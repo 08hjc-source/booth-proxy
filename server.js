@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import multer from "multer";
+import fs from "fs";
 
 const app = express();
 
@@ -18,22 +19,22 @@ app.options("/upload", (req, res) => {
 
 const upload = multer();
 
-// ⬇⬇⬇ 너 토큰 넣는 곳 (그대로 유지)
+// ⬇⬇⬇ 여기 너 토큰 넣어
 const DROPBOX_TOKEN = "Bearer sl.u.AGETpn391W2nwklxtA8oo41Gnatvu3sPidlLCA1zA9sey13ED_RlgxygVckdBIbQbl1veL0YxaGh-3Pk66U1uFCuwm-LHVqw_ERrvjVHNCHXE3LUeYKwLDzFxaPSubFVJZD3DafBresjaqFF87w5_3CwlOioun-DOqLdfnDTPzDlnH_FBt0Gnq3Z2vIWU1opWwXtKT9WPO2ihkqpotRR8TIBN6-2GEm3aFKnxOuviJx8M2yAKD_HTZghI2PylOq6MEfAG-aRV52SBsIH5a6ge7epqR_5w_ReJL_FSrkAFQv9vrwn4pO_jD3LIbSN3JCbPn1nUOSBjnhRvn4GJ7846e291h2f2C-ibdPer23H0CUNXdBJyP4qoGI5uSo-sdZmXb8fvsY9kFgAQEpL-Bx65EqGnZOrD-DUoPga3ulTHY4V-K7O97Gy1M0yCffy-PUNEqN0FVEwrfX1pXUm2ycekmwSdxpfjSXTZmel0CrcawFVQWAo8TYtZ0BtxNarnxOrwoEkIxqabjM8ge3J8kigZSuxyb3hSBAL35_BOQTbpPyr8p9qiSj4iWKkrxTk8M0joNozcMPm_9qOhIWktoHNplFeP3bYIAd7YOVbEsHDllwRMHVCnwXwXTN6gLLFK11G0ujTgHX4NsS4RQZQ-UM3X0WE35KSnJ0wRgfpHsl7LyAMol1V_wXDF0Otebe-BkKwJMNdzbUZrCzkh3aBGKiqoTWvCRtodYEtgOF5ymJW5BYyxfc5luvMvKkf5z2xaZ7V3keX6XRYtNmi9zcllk-WHmCioS1N-K3xtQlMhJMkyk__WY_BXGDkt4rWMKARLFqNjrTb7AATZ5clpUrwlaKwP7TTa1rlFpZ3MsphUiPRnHMfA5rwDYVM1I6nps3AFTwvoFbq_nxKxg1rwK7HCRXSA9EcV6rMwQIx6oXGEjQHaaH38tz4rWaSHW7o3QGL-lS3M7QQZAF_PhcborCZ0ItWz5S9x6mRX6oJnmFuVTZhjK5WVcitsE2C6EFYxH3wIIwGVZf1t2xUmAXOmObHygd5LIdEDzqPHddjbhwApJHfl-eNcEfqY06bVz9wnKH57tLlIeWtwW-5gz0hO-zA31F0KF0oUh3s_kzq0nlLKee8QDfPIKn-hgrVYiIEwT9LjMXCLokdI2A-Rh-L34lA9r3XhiN9Dn0Mi8A8iIKtb8RfopZbMbXqhRm3c1melFyzhFxUxU-F_gRz6hzblfOvTj5JZhl61CWza4hch3woH5n2ClLqVabUSq1A3dOg8jUtC6tuRnbTpR4yqOjlpbRM_nWCCHPVop0eMSoSrzdeddP5g1hBA4ZPnnJBUTP3f8Ctc5xcMbGpEV_6x9oPThphvnl7mlomandSqHwSJRnenhnVfBB4SfcDcSZy0HUzyDU-whRhpWoNKTlGixG5j9VOqboWo2D1";
-const OPENAI_KEY = "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"; // sk- 로 시작하는 키
+const OPENAI_KEY = "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";
 
-// 닉네임을 ASCII로만 변환 (Dropbox 경로에 한글 못 들어가니까)
+// 닉네임을 ASCII로만 만들어서 Dropbox 파일명에 쓰기 (드롭박스 헤더에 한글 못들어가서)
 function sanitizeAsciiFilename(userLabel) {
   const asciiOnly = (userLabel || "")
     .normalize("NFKD")
-    .replace(/[^\x00-\x7F]/g, "") // ASCII 외 제거
+    .replace(/[^\x00-\x7F]/g, "")    // ASCII 아닌 글자 제거 (한글 등)
     .replace(/[\/\\:\*\?"<>\|]/g, "") // 위험문자 제거
     .replace(/\s+/g, "_")
     .trim();
   return asciiOnly || "user";
 }
 
-// 한국시간 HHMMSS
+// 한국 시간 HHMMSS
 function getKSTTimeTag() {
   const now = new Date();
   const kst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
@@ -43,25 +44,23 @@ function getKSTTimeTag() {
   return `${hh}${mm}${ss}`;
 }
 
-// 1) Dropbox에 업로드하는 함수
+// Dropbox 업로드 (원본 / 결과)
 async function uploadToDropbox(pathInDropbox, fileBytes) {
-  const resp = await fetch(
-    "https://content.dropboxapi.com/2/files/upload",
-    {
-      method: "POST",
-      headers: {
-        Authorization: DROPBOX_TOKEN,
-        "Dropbox-API-Arg": JSON.stringify({
-          path: pathInDropbox,
-          mode: "add",
-          autorename: true,
-          mute: false,
-        }),
-        "Content-Type": "application/octet-stream",
-      },
-      body: fileBytes,
-    }
-  );
+  const resp = await fetch("https://content.dropboxapi.com/2/files/upload", {
+    method: "POST",
+    headers: {
+      Authorization: DROPBOX_TOKEN,
+      "Dropbox-API-Arg": JSON.stringify({
+        path: pathInDropbox,
+        mode: "add",
+        autorename: true,
+        mute: false,
+      }),
+      "Content-Type": "application/octet-stream",
+    },
+    body: fileBytes,
+  });
+
   const data = await resp.json();
   if (!resp.ok) {
     console.error("Dropbox upload fail:", data);
@@ -70,35 +69,76 @@ async function uploadToDropbox(pathInDropbox, fileBytes) {
   return data;
 }
 
-// 2) OpenAI 이미지 변환 호출 함수
-async function stylizeWithOpenAI(inputImageBytes) {
-  // 여기서 하는 일:
-  // - OpenAI 이미지 편집 API에 이미지랑 "스타일 설명 프롬프트"를 같이 보내서
-  //   만화/캐릭터 스타일로 바꾼 결과 이미지를 받아온다.
-  //
-  // 참고: OpenAI 이미지 API는 기존 이미지를 기반으로 수정/스타일화가 가능하다고 문서에 나와 있다.
-  // 한 장의 입력 이미지를 주고, 프롬프트로 "원본 인물은 유지하되 이 스타일로 변환해" 라고 지시할 수 있다. :contentReference[oaicite:1]{index=1}
-  //
-  // 여기서는 가상의 엔드포인트 형태로 적어줄게. (images/edits)
-  // Render 서버에서 fetch로 직접 부를 수 있는 일반 HTTP POST 형태다.
+// 🔥 스타일 변환 함수
+// userPhotoBytes: 방금 찍은 사람 사진 (Buffer)
+// 스타일 참고 이미지는 style_ref_1~4.png 전부 사용
+async function stylizeWithOpenAI(userPhotoBytes) {
+  // 1) 스타일 레퍼런스 이미지들 읽기
+  //    너는 repo 루트(= server.js랑 같은 폴더)에
+  //    style_ref_1.png, style_ref_2.png, style_ref_3.png, style_ref_4.png
+  //    이 네 장을 넣어두면 된다.
+  const styleFiles = [
+    "style_ref_1.png",
+    "style_ref_2.png",
+    "style_ref_3.png",
+    "style_ref_4.png",
+  ];
 
-  // 1) input 이미지를 form-data로 보냄
-  // 2) prompt에 우리가 원하는 스타일을 적음
+  const styleBuffers = styleFiles.map((path) => {
+    try {
+      return fs.readFileSync(path);
+    } catch (e) {
+      console.error(`스타일 이미지 ${path} 못 읽음`, e);
+      return null;
+    }
+  }).filter(Boolean);
 
-  // ↓ 이 스타일 설명은 너 그림체 설명으로 바꾸면 돼.
-  const stylePrompt =
-    "Convert the person in this photo into a clean flat mascot-style illustration with bold outlines, simple cel shading, big head small body proportions, no background, keep same clothing colors and same facial identity.";
+  if (styleBuffers.length === 0) {
+    throw new Error("스타일 레퍼런스 이미지를 하나도 못 읽었어.");
+  }
 
+  // 2) multipart/form-data 만들기
+  // OpenAI 이미지 편집 API에 여러 이미지를 동시에 넣고
+  // prompt에서 "첫 번째는 사용자 사진(콘텐츠), 나머지 4장은 스타일 레퍼런스"라고 명시해.
   const formData = new FormData();
+
+  // (1) 유저 실제 사진: 항상 가장 먼저 append한다.
   formData.append(
-    "image",
-    new Blob([inputImageBytes], { type: "image/png" }),
-    "input.png"
+    "image[]",
+    new Blob([userPhotoBytes], { type: "image/png" }),
+    "subject.png"
   );
-  formData.append("prompt", stylePrompt);
-  // 원하는 출력 사이즈
+
+  // (2) 스타일 레퍼런스들: 그 다음에 전부 append
+  styleBuffers.forEach((buf, i) => {
+    formData.append(
+      "image[]",
+      new Blob([buf], { type: "image/png" }),
+      `style_ref_${i + 1}.png`
+    );
+  });
+
+  // 3) prompt: 모델에게 역할을 아주 명확하게 설명
+  // 핵심:
+  // - 첫 번째 이미지는 "그릴 대상"
+  // - 나머지 이미지들은 "참고할 스타일"
+  // - 공통 스타일을 추출해라 (4장 보고 일관된 룩으로)
+  formData.append(
+    "prompt",
+    [
+      "Use the FIRST image as the subject (the person's real face, hair, clothing, pose).",
+      "Use ALL following images as style references.",
+      "Redraw the subject in the unified visual style shared by the style reference images:",
+      "same type of line thickness, outline color, fill style, shading style, proportions, and overall vibe.",
+      "Keep the person's identity, hairstyle, outfit colors, and pose from the first image, but render them as stylized illustration.",
+      "Output with a clean plain background (white or transparent), no text, no watermark."
+    ].join(" ")
+  );
+
+  // 원하는 결과 해상도
   formData.append("size", "1024x1024");
 
+  // 4) OpenAI 이미지 편집/스타일 전환 API 호출
   const resp = await fetch("https://api.openai.com/v1/images/edits", {
     method: "POST",
     headers: {
@@ -110,57 +150,60 @@ async function stylizeWithOpenAI(inputImageBytes) {
   const result = await resp.json();
 
   if (!resp.ok) {
-    console.error("OpenAI image edit fail:", result);
-    throw new Error("openai style conversion failed");
+    console.error("OpenAI style remix fail:", result);
+    throw new Error("openai style remix failed");
   }
 
-  // OpenAI 이미지 API는 base64로 결과 이미지를 돌려준다고 문서화되어 있음. :contentReference[oaicite:2]{index=2}
-  // result.data[0].b64_json 이런 식으로 온다.
+  // OpenAI 응답은 base64 PNG를 준다고 문서화돼 있음.
   const b64 = result.data[0].b64_json;
-  const bytes = Buffer.from(b64, "base64");
-  return bytes; // 변환된 PNG 바이너리
+  const outBytes = Buffer.from(b64, "base64");
+  return outBytes;
 }
 
 app.post("/upload", upload.single("photo"), async (req, res) => {
   try {
-    // --- 들어온 원본 파일/닉네임 확보 ---
+    // 1) 들어온 데이터 확인
     if (!req.file || !req.file.buffer) {
       return res.status(400).json({
         ok: false,
         message: "no file buffer",
       });
     }
+
     const fileBuffer = req.file.buffer;
 
+    // 닉네임 (한글 그대로 안내 용)
     const rawName =
       req.body && typeof req.body.name === "string" ? req.body.name : "";
-    console.log("받은 이름(raw):", rawName);
 
+    console.log("받은 이름:", rawName);
+
+    // 드롭박스용 파일명 베이스 (ASCII)
     const safeBase = sanitizeAsciiFilename(rawName);
     const timeTag = getKSTTimeTag();
 
-    // 원본 파일명 / 경로 (ASCII로만)
+    // 원본 저장 경로 (/booth_uploads/...)
     const origFileName = `${safeBase}_${timeTag}.png`;
     const origPath = `/booth_uploads/${origFileName}`;
 
-    // 1) 원본을 Dropbox에 저장
+    // 2) 원본 Dropbox 업로드
     await uploadToDropbox(origPath, fileBuffer);
 
-    // 2) OpenAI에 스타일 변환 요청 (이게 너가 원하는 "너 스타일로 바꿔줘" 단계)
+    // 3) GPT 이미지 스타일 변환 실행
     const stylizedBytes = await stylizeWithOpenAI(fileBuffer);
 
-    // 3) 결과 이미지를 Dropbox에 저장 (output 폴더)
+    // 4) 결과 Dropbox 업로드 (/booth_outputs/...)
     const outFileName = `${safeBase}_${timeTag}_stylized.png`;
-    const outPath = `/booth_styled/${outFileName}`;
+    const outPath = `/booth_outputs/${outFileName}`;
     await uploadToDropbox(outPath, stylizedBytes);
 
-    // 4) 클라이언트로 응답
+    // 5) 프런트 응답
     return res.json({
       ok: true,
-      user: rawName,               // 한글 닉네임 그대로
-      original_path: origPath,     // 원본 저장 위치
-      stylized_path: outPath,      // 변환본 저장 위치
-      status: "done",              // 프론트에서 '완료'라고 띄워줄 수 있음
+      user: rawName,               // "찬" 같은 실제 닉네임
+      original_path: origPath,     // 원본이 Dropbox에 어디 저장됐는지
+      stylized_path: outPath,      // 스타일 변환본이 Dropbox 어디에 있는지
+      status: "done",
     });
   } catch (err) {
     console.error("서버 내부 오류:", err);
@@ -176,5 +219,3 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log("Server running on port " + port);
 });
-
-
