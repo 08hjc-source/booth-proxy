@@ -110,13 +110,19 @@ async function uploadToDropbox(pathInDropbox, fileBytes) {
     body: fileBytes,
   });
 
-  const data = await resp.json();
-  if (!resp.ok) {
-    console.error("Dropbox upload fail:", data);
-    throw new Error("dropbox upload failed");
+  // 성공 케이스 먼저
+  if (resp.ok) {
+    // 드롭박스 정상 응답은 JSON이라 이때만 json() 파싱해
+    const data = await resp.json();
+    return data;
   }
-  return data;
+
+  // 실패 케이스 (권한 문제 등)
+  const errText = await resp.text();
+  console.error("Dropbox upload fail (raw):", errText);
+  throw new Error("dropbox upload failed: " + errText);
 }
+
 
 // ──────────────────────────────
 // 6. GPT 스타일 변환 함수
@@ -312,3 +318,4 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log("Server running on port " + port);
 });
+
