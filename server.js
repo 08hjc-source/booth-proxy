@@ -139,10 +139,7 @@ async function stylizeWithGPT(userPhotoBytes) {
 
   // (2) 스타일 레퍼런스 이미지 4장 읽기 + data URL 변환
   const stylePaths = [
-    path.join(__dirname, "style_ref_1.png"),
     path.join(__dirname, "style_ref_2.png"),
-    path.join(__dirname, "style_ref_3.png"),
-    path.join(__dirname, "style_ref_4.png"),
   ];
 
   const styleDataUrls = stylePaths.map((p) => {
@@ -340,6 +337,7 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log("Server running on port " + port);
 });
+
 
 
 
