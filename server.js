@@ -1,100 +1,65 @@
-// server.js
-
 import express from "express";
-import cors from "cors";
 import multer from "multer";
+import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
+import sharp from "sharp";
 import { fileURLToPath } from "url";
 
-// ──────────────────────────────
-// 0. 기본 세팅
-// ─────────────────────────────-
 const app = express();
-const upload = multer();
+app.use(express.json({ limit: "20mb" }));
+app.use(express.urlencoded({ extended: true }));
 
-// 현재 파일의 경로 계산 (__dirname 대용)
+// __dirname 대용 (ESM 환경)
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// CORS 허용 (프레이머에서 바로 호출 가능하게)
-app.use(
-  cors({
-    origin: "*",
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+// ====== 환경변수 ======
+const DROPBOX_TOKEN = process.env.DROPBOX_TOKEN; // "Bearer xxxx..."
+const OPENAI_KEY = process.env.OPENAI_KEY;       // "sk-xxxx..."
 
-// Preflight 처리
-app.options("/upload", (req, res) => {
-  res.sendStatus(200);
-});
-
-// ──────────────────────────────
-// 1. 환경변수 (Render에서 세팅해라)
-// ─────────────────────────────-
-//
-// Render의 Environment 탭에서 추가해야 하는 값들:
-//
-// DROPBOX_TOKEN = Bearer 네드롭박스토큰전체
-// OPENAI_KEY    = sk- 로 시작하는 OpenAI API 키
-//
-// 주의: 여기 코드 안에 하드코딩하지 말 것.
-//
-const DROPBOX_TOKEN = process.env.DROPBOX_TOKEN;
-const OPENAI_KEY = process.env.OPENAI_KEY;
-
-// 안전 체크 (없으면 서버가 떠도 호출 시 바로 에러 나게)
 if (!DROPBOX_TOKEN) {
-  console.error("ERROR: DROPBOX_TOKEN env var is missing");
+  console.warn("⚠️ WARNING: DROPBOX_TOKEN not set");
 }
 if (!OPENAI_KEY) {
-  console.error("ERROR: OPENAI_KEY env var is missing");
+  console.warn("⚠️ WARNING: OPENAI_KEY not set");
 }
 
-// ──────────────────────────────
-// 2. 유틸: 한글 닉네임 → Dropbox 안전 파일명
-// Dropbox 쪽에서 고유문자 깨지는 이슈 있으니까 ASCII만 남긴다.
-// ─────────────────────────────-
-function toAsciiSafeName(nameRaw) {
-  const asciiOnly = (nameRaw || "")
-    .normalize("NFKD")
-    .replace(/[^\x00-\x7F]/g, "") // ASCII 아닌 글자 제거(한글 등)
-    .replace(/[\/\\:\*\?"<>\|]/g, "") // 경로 깨뜨리는 문자 제거
-    .replace(/\s+/g, "_")
-    .trim();
-  return asciiOnly || "user";
+// ====== multer 설정 (메모리 저장) ======
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 15 * 1024 * 1024 // 15MB 정도 안전빵
+  }
+});
+
+// ====== helpers ======
+
+// 한글/특수문자 제거해서 Dropbox 안전한 파일명 fragment 만들기
+function sanitizeName(name) {
+  if (!name) return "guest";
+  const asciiOnly = name.replace(/[^a-zA-Z0-9_-]/g, "");
+  return asciiOnly.length > 0 ? asciiOnly : "guest";
 }
 
-// ──────────────────────────────
-// 3. 유틸: 한국 시간 HHMMSS 태그
-// ─────────────────────────────-
-function getKSTTimeTag() {
-  const now = new Date();
-  // KST = UTC+9
-  const kst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
-  const hh = String(kst.getUTCHours()).padStart(2, "0");
-  const mm = String(kst.getUTCMinutes()).padStart(2, "0");
-  const ss = String(kst.getUTCSeconds()).padStart(2, "0");
-  return `${hh}${mm}${ss}`;
+// 한국 시간(HHMMSS) 스탬프 생성 (24시간 기준)
+function makeKRTimestamp() {
+  const now = new Date(Date.now() + 9 * 60 * 60 * 1000); // UTC+9
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  const ss = String(now.getSeconds()).padStart(2, "0");
+  return `${hh}${mm}${ss}`; // 예: "195342"
 }
 
-// ──────────────────────────────
-// 4. 유틸: Buffer → data:image/png;base64,... 문자열
-// GPT 멀티모달 API에 이미지를 넣기 위해 사용
-// ─────────────────────────────-
-function bufferToDataUrlPNG(buf) {
-  const b64 = buf.toString("base64");
-  return `data:image/png;base64,${b64}`;
-}
-
-// ──────────────────────────────
-// 5. Dropbox 업로드 함수
-// pathInDropbox 예: "/booth_uploads/xxx.png"
-// fileBytes: Buffer
-// ─────────────────────────────-
+// Dropbox 업로드
 async function uploadToDropbox(pathInDropbox, fileBytes) {
+  // 디버그로 토큰 앞부분만 찍기 (전체 노출 금지)
+  console.log(
+    "DEBUG dropbox token preview:",
+    (DROPBOX_TOKEN || "").slice(0, 20)
+  );
+  console.log("DEBUG dropbox upload path:", pathInDropbox);
+
   const resp = await fetch("https://content.dropboxapi.com/2/files/upload", {
     method: "POST",
     headers: {
@@ -103,95 +68,108 @@ async function uploadToDropbox(pathInDropbox, fileBytes) {
         path: pathInDropbox,
         mode: "add",
         autorename: true,
-        mute: false,
+        mute: false
       }),
-      "Content-Type": "application/octet-stream",
+      "Content-Type": "application/octet-stream"
     },
-    body: fileBytes,
+    body: fileBytes
   });
 
-  // 성공 케이스 먼저
   if (resp.ok) {
-    // 드롭박스 정상 응답은 JSON이라 이때만 json() 파싱해
     const data = await resp.json();
+    console.log("✅ Dropbox upload success:", data.path_lower);
     return data;
   }
 
-  // 실패 케이스 (권한 문제 등)
   const errText = await resp.text();
   console.error("Dropbox upload fail (raw):", errText);
   throw new Error("dropbox upload failed: " + errText);
 }
 
+// buffer -> data URL (png)
+function bufferToDataUrlPNG(buf) {
+  const b64 = buf.toString("base64");
+  return `data:image/png;base64,${b64}`;
+}
 
-// ──────────────────────────────
-// 6. GPT 스타일 변환 함수
-// 핵심 로직:
-//   - 유저 사진 1장(userPhotoBytes)
-//   - 스타일 레퍼런스 4장(style_ref_1~4.png)
-//   → 전부 GPT 멀티모달 모델에 넣고
-//   "이 사람을 이 스타일로 그려"라고 요청
-//   → base64 PNG 결과를 Buffer로 받아 리턴
-// ─────────────────────────────-
-async function stylizeWithGPT(userPhotoBytes) {
-  // (1) 유저 사진을 data URL로 변환
-  const userPhotoDataUrl = bufferToDataUrlPNG(userPhotoBytes);
+// 방문자 원본 이미지를 512x512 PNG로 리사이즈
+async function resizeTo512(buffer) {
+  const resizedBuffer = await sharp(buffer)
+    .resize(512, 512, { fit: "cover" })
+    .png()
+    .toBuffer();
+  return resizedBuffer;
+}
 
-  // (2) 스타일 레퍼런스 이미지 4장 읽기 + data URL 변환
-  const stylePaths = [
-    path.join(__dirname, "style_ref_2.png"),
-  ];
+// GPT 스타일 변환 호출
+// 인자: resizedBuffer(512x512 PNG buffer), style_ref_all.png (스타일 합본 한 장)
+// 반환: Buffer (최종 변환된 이미지 바이트)  또는 throw
+async function stylizeWithGPT(resizedBuffer) {
+  // 준비: 방문자 이미지 base64
+  const base64User = resizedBuffer.toString("base64");
 
-  const styleDataUrls = stylePaths.map((p) => {
-    const imgBuf = fs.readFileSync(p); // 없으면 throw
-    return bufferToDataUrlPNG(imgBuf); // "data:image/png;base64,...."
-  });
+  // 준비: 스타일 참조 (1장짜리 합본)
+  const stylePath = path.join(__dirname, "style_ref_all.png");
+  let styleBuf;
+  try {
+    styleBuf = fs.readFileSync(stylePath);
+  } catch (e) {
+    console.error("❌ style_ref_all.png not found next to server.js");
+    throw new Error("missing_style_reference");
+  }
+  const base64Style = styleBuf.toString("base64");
 
-  // (3) GPT 요청 바디
-  // 바뀐 부분: 마지막 chunk의 type을 "input_text"로 보냄
+  // GPT 요청: 'gpt-4o-mini-2024-07-18' 사용
+  // 멀티모달 입력 규격:
+  // - type: "input_image" + image_data: <base64>  (우리가 가정하는 형식)
+  // - type: "input_text"  텍스트 지시
+  //
+  // 이 모델은 "내가 준 사람 사진을 스타일 이미지처럼 그려줘"를 이해하고
+  // 응답 안에서 base64(혹은 output_image 구조)를 돌려주는 걸 목표로 함.
   const gptRequestBody = {
-    model: "gpt-4o-mini",
+    model: "gpt-4o-mini-2024-07-18",
     input: [
       {
         role: "user",
         content: [
-          // 방문객 실제 사진 (변환 대상)
-          {
-            type: "input_image",
-            image_url: userPhotoDataUrl,
-          },
-
-          // 스타일 레퍼런스 이미지들
-          ...styleDataUrls.map((dataUrl) => ({
-            type: "input_image",
-            image_url: dataUrl,
-          })),
-
-          // 변환 지시 (이전엔 type:"text"여서 에러 → 이제 type:"input_text")
           {
             type: "input_text",
-            text: [
-              "Take the FIRST image (the real person photo) and redraw that person as a polished character illustration.",
-              "Copy the visual style from the style reference images I provided:",
-              "same outline thickness, flat fills, simple cel shading with one shadow tone, same head/body proportion, same facial style.",
-              "Keep the person's identity, hairstyle, clothing colors, and pose recognizable from the first photo.",
-              "Return ONLY the final character illustration on a plain white background, no text, no watermark.",
-              "Output as a clean PNG, square framing."
-            ].join(" ")
+            text:
+              "You are an illustration generator. " +
+              "Redraw the person from the first photo as a stylized character. " +
+              "Use the line quality, color blocking, shading style, face style, and body proportions from the style reference. " +
+              "Keep the same hairstyle, clothing colors, and overall pose from the original person. " +
+              "Return a clean character illustration on plain white background. No text, no watermark."
+          },
+          {
+            // 방문자 실제 사진
+            type: "input_image",
+            image_data: base64User
+          },
+          {
+            // 스타일 레퍼런스 이미지 (4장 합쳐놓은 한 장)
+            type: "input_image",
+            image_data: base64Style
           }
         ]
       }
     ]
   };
 
-    // (4) OpenAI 호출
+  console.log("DEBUG calling OpenAI with reduced payload...");
+  console.log(
+    "DEBUG OPENAI KEY preview:",
+    (OPENAI_KEY || "").slice(0, 12)
+  );
+
+  // OpenAI 호출
   const resp = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${OPENAI_KEY}`,
-      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_KEY}`,
+      "Content-Type": "application/json"
     },
-    body: JSON.stringify(gptRequestBody),
+    body: JSON.stringify(gptRequestBody)
   });
 
   const result = await resp.json();
@@ -201,144 +179,167 @@ async function stylizeWithGPT(userPhotoBytes) {
     throw new Error("gpt style remix failed");
   }
 
-  // 여기서 result 구조를 먼저 까보자
-  console.log("DEBUG GPT raw result:", JSON.stringify(result, null, 2));
+  // 여기서 모델 응답 구조를 까서 base64 PNG를 뽑아야 함.
+  // 다양한 경우를 대비해서 순서대로 검사한다.
 
-  // 시나리오 A: 우리가 기대했던 구조 (image base64 바로 옴)
+  console.log(
+    "DEBUG GPT raw result summary:",
+    JSON.stringify(
+      {
+        model: result.model,
+        status: result.status,
+        keys: Object.keys(result)
+      },
+      null,
+      2
+    )
+  );
+
   let base64Image = null;
-  try {
-    if (
-      result.output &&
-      result.output[0] &&
-      result.output[0].content &&
-      result.output[0].content[0] &&
-      result.output[0].content[0].image
-    ) {
-      base64Image = result.output[0].content[0].image;
-    }
-  } catch (e) {
-    // ignore
-  }
 
-  // 시나리오 B: 구형 data[0].b64_json 스타일
-  if (!base64Image) {
-    if (
-      result.data &&
-      result.data[0] &&
-      result.data[0].b64_json
-    ) {
-      base64Image = result.data[0].b64_json;
-    }
-  }
-
-  // 시나리오 C (신규): 모델이 텍스트만 줬을 경우
-  // result.output[0].content는 배열이니까 그걸 그대로 꺼내보자.
-  if (!base64Image) {
-    if (
-      result.output &&
-      result.output[0] &&
-      Array.isArray(result.output[0].content)
-    ) {
-      // content 배열을 전부 문자열로 이어붙인다.
-      const textChunks = [];
-      for (const chunk of result.output[0].content) {
-        if (chunk.type === "output_text" && typeof chunk.text === "string") {
-          textChunks.push(chunk.text);
-        }
+  // Case 1: result.output[0].content[*].image.b64_json 스타일
+  if (result.output && result.output[0] && Array.isArray(result.output[0].content)) {
+    for (const chunk of result.output[0].content) {
+      // 예상 형태 1:
+      // {
+      //   type: "output_image",
+      //   image: { b64_json: "..." }
+      // }
+      if (
+        chunk.type === "output_image" &&
+        chunk.image &&
+        chunk.image.b64_json
+      ) {
+        base64Image = chunk.image.b64_json;
+        break;
       }
 
-      if (textChunks.length > 0) {
-        // 아직 이미지 생성은 못했지만, 최소한 설명 텍스트는 있다.
-        // 일단 이걸 PNG로 변환할 수 없으니까 에러 대신 "텍스트만 받음"을 알려주자.
-        const debugText = textChunks.join("\n\n");
-        console.warn("WARNING: GPT returned text instead of image. Text was:\n", debugText);
-
-        // 임시로 빈 PNG(하얀 이미지)라도 하나 만들어서 리턴할 수도 있지만
-        // 지금은 명확하게 에러로 올려서 상위에서 처리하게 하자.
-        throw new Error("model_did_not_return_image_b64");
+      // 혹시 다른 형태로 "image" 바로 base64 string일 수도 있으니까 방어
+      if (
+        chunk.type === "output_image" &&
+        typeof chunk.image === "string" &&
+        chunk.image.startsWith("iVBOR") // PNG 헤더 ("iVBORw0KGgo")
+      ) {
+        base64Image = chunk.image;
+        break;
       }
     }
   }
 
-  if (!base64Image) {
-    console.error("Unexpected GPT response shape:", result);
-    throw new Error("no image in gpt response");
+  // Case 2: 옛 스타일 result.data[0].b64_json
+  if (!base64Image && result.data && result.data[0] && result.data[0].b64_json) {
+    base64Image = result.data[0].b64_json;
   }
 
+  // Case 3: 이미지가 아예 안 왔고 텍스트만 왔을 때
+  if (!base64Image) {
+    console.warn(
+      "⚠️ GPT did not return an image. Full result.output[0].content:",
+      JSON.stringify(
+        result.output && result.output[0] ? result.output[0].content : null,
+        null,
+        2
+      )
+    );
+    throw new Error("no_image_in_gpt_response");
+  }
+
+  // base64 → Buffer
   const outBytes = Buffer.from(base64Image, "base64");
   return outBytes;
 }
 
-
-// ──────────────────────────────
-// 7. /upload 라우트
-// 프레이머에서 FormData로
-//   name: 닉네임 (한글 OK)
-//   photo: 캡처된 이미지(blob)
-// 를 보내면,
-// 1) 원본 Dropbox 저장 (/booth_uploads/...)
-// 2) GPT 스타일 변환해서 결과 Dropbox 저장 (/booth_outputs/...)
-// 3) JSON으로 경로 돌려줌
-// ─────────────────────────────-
+// ====== /upload 라우트 ======
+//
+// 프론트(프레이머)에서 form-data로 전송한다고 가정
+// 필드:
+//   - nickname (텍스트)
+//   - photo (파일 / binary)
+// 응답(JSON):
+//   {
+//     ok: true/false,
+//     message: "...",
+//     originalPath: "/booth_uploads/...",
+//     stylizedPath: "/booth_outputs/..."
+//   }
+//
+// 흐름:
+// 1. 닉네임 가져오기
+// 2. 현재 한국시간으로 timestamp 뽑기
+// 3. Dropbox 파일명 생성 (한글 제거)
+// 4. 원본 이미지를 Dropbox에 저장 (PNG 변환해서 넣는 게 깔끔하므로 sharp로 png 저장)
+// 5. 512x512로 줄인 버전으로 GPT 변환 요청
+// 6. GPT 결과 이미지를 Dropbox에 저장
+//
 app.post("/upload", upload.single("photo"), async (req, res) => {
   try {
-    // 1) 사진 있는지 확인
+    // 1. 닉네임 처리
+    const rawNickname = req.body.nickname || "";
+    const cleanName = sanitizeName(rawNickname);
+
+    // 2. 시간 스탬프 (한국 기준 HHMMSS)
+    const stamp = makeKRTimestamp();
+
+    // 3. 기본 파일명
+    const baseName = `${cleanName}_${stamp}`;
+
+    // 4. 업로드된 파일(raw buffer)
     if (!req.file || !req.file.buffer) {
-      return res.status(400).json({
+      return res.status(400).json({ ok: false, message: "no file uploaded" });
+    }
+    const originalBuffer = req.file.buffer;
+
+    // 5. 원본을 PNG로 정규화 (sharp로 png 변환만)
+    const normalizedPngBuffer = await sharp(originalBuffer).png().toBuffer();
+
+    // 6. Dropbox에 원본 저장
+    const originalDropboxPath = `/booth_uploads/${baseName}.png`;
+    await uploadToDropbox(originalDropboxPath, normalizedPngBuffer);
+
+    // 7. 방문자 이미지를 512x512 PNG로 축소
+    const resizedBuffer = await resizeTo512(originalBuffer);
+
+    // 8. GPT에 스타일 변환 요청 (rate limit 줄이기 위해 스타일 이미지는 style_ref_all.png 하나만 사용)
+    let stylizedBuffer;
+    try {
+      stylizedBuffer = await stylizeWithGPT(resizedBuffer);
+    } catch (err) {
+      console.error("❌ stylizeWithGPT failed:", err);
+      return res.status(500).json({
         ok: false,
-        message: "no file buffer",
+        message: "style transform failed",
+        details: String(err.message || err)
       });
     }
-    const fileBuffer = req.file.buffer;
 
-    // 2) 닉네임(한글 그대로 화면용), 파일명용 ASCII 버전
-    const rawName =
-      req.body && typeof req.body.name === "string" ? req.body.name : "";
-    const safeName = toAsciiSafeName(rawName);
+    // 9. 스타일 결과 Dropbox에 저장
+    const stylizedDropboxPath = `/booth_outputs/${baseName}_stylized.png`;
+    await uploadToDropbox(stylizedDropboxPath, stylizedBuffer);
 
-    // 3) 고유 태그 (KST 시각)
-    const timeTag = getKSTTimeTag();
-
-    // 예: /booth_uploads/user_145210.png
-    const origFileName = `${safeName}_${timeTag}.png`;
-    const origPath = `/booth_uploads/${origFileName}`;
-
-    // 4) 원본 Dropbox 업로드
-    await uploadToDropbox(origPath, fileBuffer);
-
-    // 5) GPT 스타일 변환 실행
-    const stylizedBytes = await stylizeWithGPT(fileBuffer);
-
-    // 6) 결과 Dropbox 업로드
-    const outFileName = `${safeName}_${timeTag}_stylized.png`;
-    const outPath = `/booth_outputs/${outFileName}`;
-    await uploadToDropbox(outPath, stylizedBytes);
-
-    // 7) 프론트로 응답
+    // 10. 응답
     return res.json({
       ok: true,
-      user: rawName,            // 한글 닉네임 그대로 돌려줌
-      original_path: origPath,  // 원본 저장 위치
-      stylized_path: outPath,   // 변환본 저장 위치
-      status: "done",
+      message: "upload + stylize complete",
+      originalPath: originalDropboxPath,
+      stylizedPath: stylizedDropboxPath
     });
   } catch (err) {
     console.error("서버 내부 오류:", err);
     return res.status(500).json({
       ok: false,
-      message: "server crashed in upload flow",
-      error: String(err && err.message ? err.message : err),
+      message: "server error",
+      details: String(err.message || err)
     });
   }
 });
 
-// ──────────────────────────────
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log("Server running on port " + port);
+// 헬스체크용
+app.get("/health", (req, res) => {
+  res.json({ ok: true, status: "alive" });
 });
 
-
-
-
-
+// Render가 기본적으로 10000 같은 포트 안쓰고 PORT env 씀
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`🚀 booth-proxy running on :${PORT}`);
+});
