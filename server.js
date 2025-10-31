@@ -151,7 +151,7 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
 
     // 3) 결과 이미지를 Dropbox에 저장 (output 폴더)
     const outFileName = `${safeBase}_${timeTag}_stylized.png`;
-    const outPath = `/booth_outputs/${outFileName}`;
+    const outPath = `/booth_styled/${outFileName}`;
     await uploadToDropbox(outPath, stylizedBytes);
 
     // 4) 클라이언트로 응답
@@ -176,4 +176,5 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log("Server running on port " + port);
 });
+
 
