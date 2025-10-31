@@ -138,8 +138,7 @@ async function stylizeWithGPT(userPhotoBytes) {
   const userPhotoDataUrl = bufferToDataUrlPNG(userPhotoBytes);
 
   // (2) 스타일 레퍼런스 이미지 4장 읽기 + data URL 변환
-  //    이 이미지 파일들은 반드시 server.js와 같은 폴더(= __dirname)에
-  //    style_ref_1.png ~ style_ref_4.png 라는 이름으로 업로드되어 있어야 함.
+  //    style_ref_1.png ~ style_ref_4.png 는 server.js와 같은 폴더에 있어야 함
   const stylePaths = [
     path.join(__dirname, "style_ref_1.png"),
     path.join(__dirname, "style_ref_2.png"),
@@ -148,49 +147,55 @@ async function stylizeWithGPT(userPhotoBytes) {
   ];
 
   const styleDataUrls = stylePaths.map((p) => {
-    const imgBuf = fs.readFileSync(p); // 파일 없으면 여기서 throw -> catch로 감
-    return bufferToDataUrlPNG(imgBuf);
+    const imgBuf = fs.readFileSync(p); // 없으면 throw
+    return bufferToDataUrlPNG(imgBuf); // "data:image/png;base64,...."
   });
 
-  // (3) GPT 요청 바디 구성
-  // gpt-4o-mini 같은 멀티모달 모델에게
-  // 첫 번째 이미지는 "변환 대상 사람"
-  // 그 다음 4장은 "이 스타일로 그려" 레퍼런스
-  // 마지막 text는 구체 지시
+  // (3) GPT 요청 바디
+  // 여기서 핵심:
+  // - 'modalities' 같은 필드 제거
+  // - 'size'도 일단 제거
+  //
+  // 구조는:
+  //   model: ...
+  //   input: [
+  //     { role: "user", content: [ {type:"input_image"...}, ... , {type:"text", text:"..."} ] }
+  //   ]
+  //
+  // GPT에게 "이 사람을 이 스타일처럼 그려"라고 직접 지시.
   const gptRequestBody = {
-    model: "gpt-4o-mini", // 멀티모달(이미지 입력+이미지 출력) 가능한 모델이어야 함
+    model: "gpt-4o-mini", // 멀티모달 모델 (이미지 이해 가능 모델이어야 함)
     input: [
       {
         role: "user",
         content: [
-          // 방문객 실제 사진
+          // 0. 방문객 실제 사진
           {
             type: "input_image",
             image_url: userPhotoDataUrl,
           },
 
-          // 스타일 레퍼런스 4장
+          // 1~4. 스타일 레퍼런스
           ...styleDataUrls.map((dataUrl) => ({
             type: "input_image",
             image_url: dataUrl,
           })),
 
-          // 지시문
+          // 5. 변환 지시 텍스트
           {
             type: "text",
             text: [
-              "Take the FIRST image (the real person photo) and redraw that person as a clean character illustration.",
-              "Copy the exact visual style from the following reference style images:",
-              "same outline thickness, same flat fill colors, simple cel shading with 1 shadow tone, head/body proportion, and facial style.",
-              "Keep the person's identity, hairstyle, clothing colors, and pose recognizable from the first image.",
-              "Final output: a polished character illustration on plain white background. No text, no watermark."
+              "Redraw the FIRST image (the real person photo) as a polished character illustration.",
+              "Copy the visual style from the style reference images I provided:",
+              "same outline thickness, flat fills, simple cel shading with one shadow tone, same head/body proportion, same facial style.",
+              "Keep the person's identity, hairstyle, clothing colors, and pose recognizable from the first photo.",
+              "Return ONLY the final character illustration on a plain white background, no text, no watermark.",
+              "Output as a clean PNG, square framing."
             ].join(" ")
           }
         ]
       }
-    ],
-    modalities: ["image"],
-    size: "1024x1024"
+    ]
   };
 
   // (4) OpenAI 호출
@@ -211,12 +216,13 @@ async function stylizeWithGPT(userPhotoBytes) {
   }
 
   // (5) 응답에서 base64 PNG 꺼내기
-  // 주의: 실제 응답 구조는 모델 버전에 따라 다를 수 있다.
-  // 여기서는 두 가지 패턴을 대비한다.
-
+  //
+  // 모델마다 응답 구조가 다를 수 있으니까, 2가지 케이스 다 시도:
+  //  A. result.output[0].content[0].image
+  //  B. result.data[0].b64_json
+  //
   let base64Image = null;
 
-  // 패턴 A: result.output[0].content[0].image
   try {
     if (
       result.output &&
@@ -228,10 +234,9 @@ async function stylizeWithGPT(userPhotoBytes) {
       base64Image = result.output[0].content[0].image;
     }
   } catch (e) {
-    // 그냥 무시하고 다음 시나리오로
+    // 무시하고 B로 간다
   }
 
-  // 패턴 B: result.data[0].b64_json
   if (!base64Image) {
     if (
       result.data &&
@@ -318,4 +323,5 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log("Server running on port " + port);
 });
+
 
