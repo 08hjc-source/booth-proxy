@@ -109,12 +109,12 @@ async function stylizeWithGPT(resizedBuffer) {
   const base64User = resizedBuffer.toString("base64");
 
   // 준비: 스타일 참조 (1장짜리 합본)
-  const stylePath = path.join(__dirname, "style_ref_all.png");
+  const stylePath = path.join(__dirname, "style_ref_2.png");
   let styleBuf;
   try {
     styleBuf = fs.readFileSync(stylePath);
   } catch (e) {
-    console.error("❌ style_ref_all.png not found next to server.js");
+    console.error("❌ style_ref_2.png not found next to server.js");
     throw new Error("missing_style_reference");
   }
   const base64Style = styleBuf.toString("base64");
@@ -299,7 +299,7 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
     // 7. 방문자 이미지를 512x512 PNG로 축소
     const resizedBuffer = await resizeTo512(originalBuffer);
 
-    // 8. GPT에 스타일 변환 요청 (rate limit 줄이기 위해 스타일 이미지는 style_ref_all.png 하나만 사용)
+    // 8. GPT에 스타일 변환 요청 (rate limit 줄이기 위해 스타일 이미지는 style_ref_2.png 하나만 사용)
     let stylizedBuffer;
     try {
       stylizedBuffer = await stylizeWithGPT(resizedBuffer);
@@ -343,3 +343,4 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 booth-proxy running on :${PORT}`);
 });
+
