@@ -187,7 +187,7 @@ async function stylizeWithGPT(userPhotoBytes) {
     ]
   };
 
-  // (4) OpenAI 호출
+    // (4) OpenAI 호출
   const resp = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -204,11 +204,11 @@ async function stylizeWithGPT(userPhotoBytes) {
     throw new Error("gpt style remix failed");
   }
 
-  // (5) 응답에서 base64 PNG 꺼내기
-  // 여전히 두 케이스 다 핸들링
-  let base64Image = null;
+  // 여기서 result 구조를 먼저 까보자
+  console.log("DEBUG GPT raw result:", JSON.stringify(result, null, 2));
 
-  // 케이스 A
+  // 시나리오 A: 우리가 기대했던 구조 (image base64 바로 옴)
+  let base64Image = null;
   try {
     if (
       result.output &&
@@ -220,10 +220,10 @@ async function stylizeWithGPT(userPhotoBytes) {
       base64Image = result.output[0].content[0].image;
     }
   } catch (e) {
-    // 그냥 다음 케이스로
+    // ignore
   }
 
-  // 케이스 B
+  // 시나리오 B: 구형 data[0].b64_json 스타일
   if (!base64Image) {
     if (
       result.data &&
@@ -231,6 +231,35 @@ async function stylizeWithGPT(userPhotoBytes) {
       result.data[0].b64_json
     ) {
       base64Image = result.data[0].b64_json;
+    }
+  }
+
+  // 시나리오 C (신규): 모델이 텍스트만 줬을 경우
+  // result.output[0].content는 배열이니까 그걸 그대로 꺼내보자.
+  if (!base64Image) {
+    if (
+      result.output &&
+      result.output[0] &&
+      Array.isArray(result.output[0].content)
+    ) {
+      // content 배열을 전부 문자열로 이어붙인다.
+      const textChunks = [];
+      for (const chunk of result.output[0].content) {
+        if (chunk.type === "output_text" && typeof chunk.text === "string") {
+          textChunks.push(chunk.text);
+        }
+      }
+
+      if (textChunks.length > 0) {
+        // 아직 이미지 생성은 못했지만, 최소한 설명 텍스트는 있다.
+        // 일단 이걸 PNG로 변환할 수 없으니까 에러 대신 "텍스트만 받음"을 알려주자.
+        const debugText = textChunks.join("\n\n");
+        console.warn("WARNING: GPT returned text instead of image. Text was:\n", debugText);
+
+        // 임시로 빈 PNG(하얀 이미지)라도 하나 만들어서 리턴할 수도 있지만
+        // 지금은 명확하게 에러로 올려서 상위에서 처리하게 하자.
+        throw new Error("model_did_not_return_image_b64");
+      }
     }
   }
 
@@ -242,6 +271,7 @@ async function stylizeWithGPT(userPhotoBytes) {
   const outBytes = Buffer.from(base64Image, "base64");
   return outBytes;
 }
+
 
 // ──────────────────────────────
 // 7. /upload 라우트
@@ -310,6 +340,7 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log("Server running on port " + port);
 });
+
 
 
 
