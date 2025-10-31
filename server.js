@@ -1,10 +1,18 @@
 import express from "express";
 import cors from "cors";
 import multer from "multer";
+import dotenv from "dotenv";
+
+// .env 불러오기 (.env 파일에 비밀키 넣어둠)
+dotenv.config();
 
 const app = express();
 
-// CORS 설정 (전시장 현장 운영이라 널널하게 오픈)
+// =========================
+// 0. 기본 서버/미들웨어 설정
+// =========================
+
+// CORS 설정 (전시장 현장용이라 전체 허용)
 app.use(
   cors({
     origin: "*",
@@ -13,47 +21,222 @@ app.use(
   })
 );
 
-// 프리플라이트(브라우저 사전 요청) 허용
+// 프리플라이트(브라우저 사전요청) 허용
 app.options("/upload", (req, res) => {
   res.sendStatus(200);
 });
 
-// multipart/form-data 처리
+// multipart/form-data 처리기 (사진 받으려고 필요)
 const upload = multer();
 
-// 🔐 Dropbox 토큰 (Bearer 포함해서 한 줄 그대로 복붙할 것)
-const DROPBOX_TOKEN =
-  "Bearer sl.u.AGETpn391W2nwklxtA8oo41Gnatvu3sPidlLCA1zA9sey13ED_RlgxygVckdBIbQbl1veL0YxaGh-3Pk66U1uFCuwm-LHVqw_ERrvjVHNCHXE3LUeYKwLDzFxaPSubFVJZD3DafBresjaqFF87w5_3CwlOioun-DOqLdfnDTPzDlnH_FBt0Gnq3Z2vIWU1opWwXtKT9WPO2ihkqpotRR8TIBN6-2GEm3aFKnxOuviJx8M2yAKD_HTZghI2PylOq6MEfAG-aRV52SBsIH5a6ge7epqR_5w_ReJL_FSrkAFQv9vrwn4pO_jD3LIbSN3JCbPn1nUOSBjnhRvn4GJ7846e291h2f2C-ibdPer23H0CUNXdBJyP4qoGI5uSo-sdZmXb8fvsY9kFgAQEpL-Bx65EqGnZOrD-DUoPga3ulTHY4V-K7O97Gy1M0yCffy-PUNEqN0FVEwrfX1pXUm2ycekmwSdxpfjSXTZmel0CrcawFVQWAo8TYtZ0BtxNarnxOrwoEkIxqabjM8ge3J8kigZSuxyb3hSBAL35_BOQTbpPyr8p9qiSj4iWKkrxTk8M0joNozcMPm_9qOhIWktoHNplFeP3bYIAd7YOVbEsHDllwRMHVCnwXwXTN6gLLFK11G0ujTgHX4NsS4RQZQ-UM3X0WE35KSnJ0wRgfpHsl7LyAMol1V_wXDF0Otebe-BkKwJMNdzbUZrCzkh3aBGKiqoTWvCRtodYEtgOF5ymJW5BYyxfc5luvMvKkf5z2xaZ7V3keX6XRYtNmi9zcllk-WHmCioS1N-K3xtQlMhJMkyk__WY_BXGDkt4rWMKARLFqNjrTb7AATZ5clpUrwlaKwP7TTa1rlFpZ3MsphUiPRnHMfA5rwDYVM1I6nps3AFTwvoFbq_nxKxg1rwK7HCRXSA9EcV6rMwQIx6oXGEjQHaaH38tz4rWaSHW7o3QGL-lS3M7QQZAF_PhcborCZ0ItWz5S9x6mRX6oJnmFuVTZhjK5WVcitsE2C6EFYxH3wIIwGVZf1t2xUmAXOmObHygd5LIdEDzqPHddjbhwApJHfl-eNcEfqY06bVz9wnKH57tLlIeWtwW-5gz0hO-zA31F0KF0oUh3s_kzq0nlLKee8QDfPIKn-hgrVYiIEwT9LjMXCLokdI2A-Rh-L34lA9r3XhiN9Dn0Mi8A8iIKtb8RfopZbMbXqhRm3c1melFyzhFxUxU-F_gRz6hzblfOvTj5JZhl61CWza4hch3woH5n2ClLqVabUSq1A3dOg8jUtC6tuRnbTpR4yqOjlpbRM_nWCCHPVop0eMSoSrzdeddP5g1hBA4ZPnnJBUTP3f8Ctc5xcMbGpEV_6x9oPThphvnl7mlomandSqHwSJRnenhnVfBB4SfcDcSZy0HUzyDU-whRhpWoNKTlGixG5j9VOqboWo2D1";
+// =========================
+// 1. 환경 변수 (비밀키)
+// =========================
+//
+// .env 예시:
+// DROPBOX_TOKEN=Bearer 슬래시시작~긴토큰
+// GPT_IMAGE_API_KEY=sk-너의-gpt-api키
+// GPT_IMAGE_ENDPOINT=https://너_gpt이미지변환_엔드포인트
+//
+const DROPBOX_TOKEN = process.env.DROPBOX_TOKEN;
+const GPT_IMAGE_API_KEY = process.env.GPT_IMAGE_API_KEY;
+const GPT_IMAGE_ENDPOINT = process.env.GPT_IMAGE_ENDPOINT;
 
-// 닉네임을 Dropbox용 ASCII 세이프 문자열로 변환
+// 방어적으로 체크 (없으면 콘솔에 경고만 찍어줌)
+if (!DROPBOX_TOKEN) {
+  console.warn("⚠ DROPBOX_TOKEN is missing from .env");
+}
+if (!GPT_IMAGE_API_KEY) {
+  console.warn("⚠ GPT_IMAGE_API_KEY is missing from .env");
+}
+if (!GPT_IMAGE_ENDPOINT) {
+  console.warn("⚠ GPT_IMAGE_ENDPOINT is missing from .env");
+}
+
+// =========================
+// 2. 유틸 함수들
+// =========================
+
+// (A) 닉네임을 ASCII 안전 파일이름으로 바꾼다
 // - 한글 등 ASCII 아닌 문자는 제거
-// - 공백 → _
-// - 파일명에 못 쓰는 기호 제거
-// - 다 지워져서 비면 "user"로 대체
+// - 공백은 _ 로 치환
+// - 파일/경로 깨는 특수문자는 제거
+// - 전부 없어지면 "user"로 대체
 function sanitizeAsciiFilename(userLabel) {
   const asciiOnly = (userLabel || "")
     .normalize("NFKD")
-    .replace(/[^\x00-\x7F]/g, "") // ASCII 외 전부 제거
+    .replace(/[^\x00-\x7F]/g, "") // ASCII 이외 문자 제거
     .replace(/[\/\\:\*\?"<>\|]/g, "") // 경로 깨는 문자 제거
-    .replace(/\s+/g, "_") // 공백을 _
+    .replace(/\s+/g, "_") // 공백 → _
     .trim();
 
   return asciiOnly || "user";
 }
 
-// 한국시간(KST, UTC+9) 기준 HHMMSS 문자열 생성
+// (B) 한국시간(KST, UTC+9 기준) HHMMSS 형태의 태그 생성
+//    예: "134209"
 function getKSTTimeTag() {
   const now = new Date();
-  const kst = new Date(now.getTime() + 9 * 60 * 60 * 1000); // UTC+9로 보정
+  const kst = new Date(now.getTime() + 9 * 60 * 60 * 1000); // UTC+9 보정
   const hours = String(kst.getUTCHours()).padStart(2, "0");
   const mins = String(kst.getUTCMinutes()).padStart(2, "0");
   const secs = String(kst.getUTCSeconds()).padStart(2, "0");
-  return `${hours}${mins}${secs}`; // 예: "134209"
+  return `${hours}${mins}${secs}`;
 }
 
+// (C) 원본 경로(/booth_uploads/파일명.png)를
+//     스타일 결과 경로(/booth_styled/파일명.png)로 바꿔주는 함수
+function makeStyledPath(originalPath) {
+  return originalPath.replace("/booth_uploads/", "/booth_styled/");
+}
+
+// (D) Dropbox에 buffer(이미지)를 업로드하는 함수
+async function uploadBufferToDropbox(buffer, dropboxPath) {
+  // Node 18+ 에서는 fetch 전역 지원. (Render/LTS 서버는 보통 최신 Node)
+  const resp = await fetch("https://content.dropboxapi.com/2/files/upload", {
+    method: "POST",
+    headers: {
+      Authorization: DROPBOX_TOKEN,
+      "Dropbox-API-Arg": JSON.stringify({
+        path: dropboxPath,
+        mode: "add",
+        autorename: true,
+        mute: false,
+      }),
+      "Content-Type": "application/octet-stream",
+    },
+    body: buffer,
+  });
+
+  const data = await resp.json();
+
+  if (!resp.ok) {
+    console.error("Dropbox upload error:", data);
+    throw new Error("uploadBufferToDropbox failed");
+  }
+
+  return data;
+}
+
+// (E) Dropbox에서 파일을 다운로드하여 Buffer로 돌려주는 함수
+//     ⚠ 중요: Dropbox /2/files/download는 경로를 헤더 "Dropbox-API-Arg"에 넣는다.
+//     ASCII 이외 문자가 경로에 있으면 Node가 'ERR_INVALID_CHAR' 뱉을 수 있다.
+//     우리는 이미 파일명을 ASCII로 만들었기 때문에 안전하다는 전제.
+async function downloadFromDropbox(dropboxPath) {
+  const resp = await fetch("https://content.dropboxapi.com/2/files/download", {
+    method: "POST",
+    headers: {
+      Authorization: DROPBOX_TOKEN,
+      "Dropbox-API-Arg": JSON.stringify({
+        path: dropboxPath,
+      }),
+    },
+  });
+
+  if (!resp.ok) {
+    const t = await resp.text();
+    console.error("Dropbox download error:", t);
+    throw new Error("downloadFromDropbox failed");
+  }
+
+  const buffer = Buffer.from(await resp.arrayBuffer());
+  return buffer;
+}
+
+// (F) GPT 스타일 변환 호출
+//     originalBuffer: 원본 이미지 (PNG 등)
+//     return: 변환된 이미지(Buffer)
+//
+//     ⚠ 여기서 GPT_IMAGE_ENDPOINT와 GPT_IMAGE_API_KEY는
+//     너가 실제 사용할 이미지 변환 API 규격에 맞게 바꿔줘야 한다.
+//     지금은 "image(base64) + prompt"를 보내고
+//     "output_image"(base64)로 받는다고 가정한 형태야.
+async function callStyleTransferModel(originalBuffer) {
+  // 전시에 쓰고 싶은 시각 스타일 지시문
+  // -> 전시장 전체 톤이 통일되게끔 항상 같은 스타일로 유지하는 게 좋다
+  const stylePrompt = `
+굵고 선명한 검은 라인으로 단순화된 만화 스타일,
+배경은 완전히 하얀 종이처럼 흰색,
+사람의 포즈와 형태는 알아볼 수 있게 유지,
+스캔된 잉크 드로잉 같은 질감.
+`;
+
+  // 원본 이미지를 base64로 인코딩해 전송한다고 가정
+  const base64Input = originalBuffer.toString("base64");
+
+  const resp = await fetch(GPT_IMAGE_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${GPT_IMAGE_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      prompt: stylePrompt,
+      image: base64Input,
+      strength: 0.7, // 원본을 얼마나 유지할지 (0~1 가정값)
+    }),
+  });
+
+  if (!resp.ok) {
+    const t = await resp.text();
+    console.error("Style transfer error:", t);
+    throw new Error("callStyleTransferModel failed");
+  }
+
+  // 응답은 JSON이라고 가정:
+  // { output_image: "<base64 PNG...>" }
+  const resultJson = await resp.json();
+
+  const outputBase64 = resultJson.output_image;
+  if (!outputBase64) {
+    throw new Error("No output_image from style model");
+  }
+
+  const styledBuffer = Buffer.from(outputBase64, "base64");
+  return styledBuffer;
+}
+
+// (G) 전체 후처리 파이프라인
+//     1) Dropbox에서 원본 이미지 다운로드
+//     2) GPT로 스타일 변환
+//     3) 같은 파일명으로 /booth_styled/ 폴더에 업로드
+async function processAndRedropbox(originalPath) {
+  try {
+    console.log("▶ post-process start:", originalPath);
+
+    // 1. Dropbox에서 원본 이미지 파일 받기 (Buffer)
+    const originalBuffer = await downloadFromDropbox(originalPath);
+
+    // 2. GPT 스타일 변환 호출
+    const styledBuffer = await callStyleTransferModel(originalBuffer);
+
+    // 3. 결과 저장 경로 (파일명은 그대로, 폴더만 booth_styled)
+    const styledPath = makeStyledPath(originalPath);
+
+    // 4. 변환된 이미지를 Dropbox에 업로드
+    await uploadBufferToDropbox(styledBuffer, styledPath);
+
+    console.log("✅ post-process done:", styledPath);
+  } catch (err) {
+    console.error("post-process failed:", err);
+  }
+}
+
+// =========================
+// 3. 업로드 라우트
+// =========================
+//
+// 클라이언트는 form-data로 보낸다:
+// - photo: 실제 이미지 파일
+// - name: 유저 이름(닉네임) 문자열
+//
+// 응답으로:
+// - original_path : /booth_uploads/...png
+// - styled_path   : /booth_styled/...png (곧 생성될 예정 경로 안내용)
+//
 app.post("/upload", upload.single("photo"), async (req, res) => {
   try {
-    // 1) 파일 검사
+    // (1) 파일 유효성 확인
     if (!req.file || !req.file.buffer) {
       return res.status(400).json({
         ok: false,
@@ -64,61 +247,42 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
 
     const fileBuffer = req.file.buffer;
 
-    // 2) 닉네임 추출 (한글 포함 그대로)
+    // (2) 유저가 보낸 이름(닉네임). 한글일 수도 있음.
+    //     rawName은 전시에 '이건 누구 작품이다' 표시용으로만 쓸 수 있어.
     const rawName =
       req.body && typeof req.body.name === "string" ? req.body.name : "";
     console.log("받은 이름(raw):", rawName);
 
-    // 3) ASCII 파일명 생성
-    const safeBase = sanitizeAsciiFilename(rawName); // ex) "chan" 또는 "user"
-    const timeTag = getKSTTimeTag(); // ex) "134209"
-    const finalFileName = `${safeBase}_${timeTag}.png`; // ex) "chan_134209.png"
+    // (3) Dropbox에 안전하게 쓸 ASCII 파일명 만들기
+    //     예: "user_134209.png"
+    const safeBase = sanitizeAsciiFilename(rawName); // ex) "juchan" or "user"
+    const timeTag = getKSTTimeTag();                 // ex) "134209"
+    const finalFileName = `${safeBase}_${timeTag}.png`;
 
-    // 4) Dropbox 경로
-    //    ⚠ 여기엔 ASCII만 들어가야 API가 안 터짐
-    const dropboxPath = `/booth_uploads/${finalFileName}`;
-    console.log("업로드 경로:", dropboxPath);
+    // (4) Dropbox에 원본을 저장할 경로
+    //     ASCII만 쓰이므로 Dropbox 헤더 제약에 안 걸리게 설계
+    const dropboxPathOriginal = `/booth_uploads/${finalFileName}`;
+    console.log("업로드 경로:", dropboxPathOriginal);
 
-    // 5) Dropbox 업로드 호출
-    // Node 22는 fetch 글로벌 지원, node-fetch 불필요
-    const dropResp = await fetch(
-      "https://content.dropboxapi.com/2/files/upload",
-      {
-        method: "POST",
-        headers: {
-          Authorization: DROPBOX_TOKEN,
-          "Dropbox-API-Arg": JSON.stringify({
-            path: dropboxPath,
-            mode: "add",
-            autorename: true,
-            mute: false,
-          }),
-          "Content-Type": "application/octet-stream",
-        },
-        body: fileBuffer,
-      }
+    // (5) Dropbox로 업로드
+    const dropRespData = await uploadBufferToDropbox(
+      fileBuffer,
+      dropboxPathOriginal
     );
 
-    const dropData = await dropResp.json();
-    console.log("Dropbox 응답:", dropData);
+    // (6) 업로드 성공했으니, 후처리(스타일 변환) 비동기 실행
+    //     이건 기다리지 않고 바로 실행만 던진다.
+    processAndRedropbox(dropboxPathOriginal);
 
-    if (!dropResp.ok) {
-      // Dropbox 자체에서 에러났을 때
-      return res.status(500).json({
-        ok: false,
-        message: "dropbox upload failed",
-        dropbox_error: dropData,
-      });
-    }
-
-    // 6) 성공 응답
-    //    - path: Dropbox에 실제로 저장된 경로 (ASCII 이름)
-    //    - user: 실제 참여자 닉네임(한글 그대로) -> 프론트에서 안내용으로 쓸 수 있음
+    // (7) 클라이언트에게 응답
+    //     styled_path는 "곧 여기에 스타일 버전이 올라간다"라는 안내용
     return res.json({
       ok: true,
-      path: dropData.path_display || dropboxPath,
       user: rawName,
       filename: finalFileName,
+      original_path: dropboxPathOriginal,
+      styled_path: makeStyledPath(dropboxPathOriginal),
+      dropbox_result: dropRespData, // 필요 없으면 빼도 됨
     });
   } catch (err) {
     console.error("서버 내부 오류:", err);
@@ -130,7 +294,9 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
   }
 });
 
-// Render에서 자동으로 PORT를 넣어주기 때문에 그걸 우선 사용
+// =========================
+// 4. 서버 시작
+// =========================
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log("Server running on port " + port);
