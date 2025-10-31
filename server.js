@@ -138,7 +138,6 @@ async function stylizeWithGPT(userPhotoBytes) {
   const userPhotoDataUrl = bufferToDataUrlPNG(userPhotoBytes);
 
   // (2) 스타일 레퍼런스 이미지 4장 읽기 + data URL 변환
-  //    style_ref_1.png ~ style_ref_4.png 는 server.js와 같은 폴더에 있어야 함
   const stylePaths = [
     path.join(__dirname, "style_ref_1.png"),
     path.join(__dirname, "style_ref_2.png"),
@@ -152,40 +151,30 @@ async function stylizeWithGPT(userPhotoBytes) {
   });
 
   // (3) GPT 요청 바디
-  // 여기서 핵심:
-  // - 'modalities' 같은 필드 제거
-  // - 'size'도 일단 제거
-  //
-  // 구조는:
-  //   model: ...
-  //   input: [
-  //     { role: "user", content: [ {type:"input_image"...}, ... , {type:"text", text:"..."} ] }
-  //   ]
-  //
-  // GPT에게 "이 사람을 이 스타일처럼 그려"라고 직접 지시.
+  // 바뀐 부분: 마지막 chunk의 type을 "input_text"로 보냄
   const gptRequestBody = {
-    model: "gpt-4o-mini", // 멀티모달 모델 (이미지 이해 가능 모델이어야 함)
+    model: "gpt-4o-mini",
     input: [
       {
         role: "user",
         content: [
-          // 0. 방문객 실제 사진
+          // 방문객 실제 사진 (변환 대상)
           {
             type: "input_image",
             image_url: userPhotoDataUrl,
           },
 
-          // 1~4. 스타일 레퍼런스
+          // 스타일 레퍼런스 이미지들
           ...styleDataUrls.map((dataUrl) => ({
             type: "input_image",
             image_url: dataUrl,
           })),
 
-          // 5. 변환 지시 텍스트
+          // 변환 지시 (이전엔 type:"text"여서 에러 → 이제 type:"input_text")
           {
-            type: "text",
+            type: "input_text",
             text: [
-              "Redraw the FIRST image (the real person photo) as a polished character illustration.",
+              "Take the FIRST image (the real person photo) and redraw that person as a polished character illustration.",
               "Copy the visual style from the style reference images I provided:",
               "same outline thickness, flat fills, simple cel shading with one shadow tone, same head/body proportion, same facial style.",
               "Keep the person's identity, hairstyle, clothing colors, and pose recognizable from the first photo.",
@@ -216,13 +205,10 @@ async function stylizeWithGPT(userPhotoBytes) {
   }
 
   // (5) 응답에서 base64 PNG 꺼내기
-  //
-  // 모델마다 응답 구조가 다를 수 있으니까, 2가지 케이스 다 시도:
-  //  A. result.output[0].content[0].image
-  //  B. result.data[0].b64_json
-  //
+  // 여전히 두 케이스 다 핸들링
   let base64Image = null;
 
+  // 케이스 A
   try {
     if (
       result.output &&
@@ -234,9 +220,10 @@ async function stylizeWithGPT(userPhotoBytes) {
       base64Image = result.output[0].content[0].image;
     }
   } catch (e) {
-    // 무시하고 B로 간다
+    // 그냥 다음 케이스로
   }
 
+  // 케이스 B
   if (!base64Image) {
     if (
       result.data &&
@@ -323,5 +310,6 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log("Server running on port " + port);
 });
+
 
 
