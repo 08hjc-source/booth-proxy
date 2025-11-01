@@ -3,7 +3,6 @@ import multer from "multer";
 import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
-import sharp from "sharp";
 import { fileURLToPath } from "url";
 
 //
@@ -19,11 +18,11 @@ const app = express();
 app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// 환경 변수
+// 환경 변수 (Render에서 설정)
 let DROPBOX_TOKEN = process.env.DROPBOX_TOKEN || "";
 let OPENAI_KEY = process.env.OPENAI_KEY || "";
 
-// Dropbox Authorization 헤더용 래퍼
+// Dropbox Authorization 헤더 포맷 정규화
 function dbxAuthHeader() {
   if (DROPBOX_TOKEN.startsWith("Bearer ")) {
     return DROPBOX_TOKEN;
@@ -38,29 +37,29 @@ if (!OPENAI_KEY) {
   console.warn("⚠️ OPENAI_KEY not set");
 }
 
-// 스타일 참조 이미지를 로컬 파일로 둔다.
-// server.js와 같은 폴더 기준 ./assets/style_ref_all.png 에 넣어둘 것
+// 스타일 참조 이미지는 고정 리소스
+// server.js랑 같은 폴더 위치 기준 ./assets/style_ref_all.png 에 넣어둘 것
 const STYLE_REF_LOCAL = path.join(__dirname, "assets", "style_ref_all.png");
 
 //
 // ─────────────────────────────
-// multer: 사진 파일을 메모리로 받는다
+// multer: 촬영 이미지를 메모리로 수신
 // ─────────────────────────────
 //
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 15 * 1024 * 1024 // 최대 15MB
+    fileSize: 15 * 1024 * 1024 // 15MB 제한
   }
 });
 
 //
 // ─────────────────────────────
-// 유틸 함수들
+// 유틸 함수
 // ─────────────────────────────
 //
 
-// 닉네임에서 Dropbox 경로에 문제될 수 있는 문자 제거
+// 닉네임에서 위험한 문자 제거 (Dropbox 경로에 쓸 거라서)
 function sanitizeName(name) {
   if (!name) return "guest";
   const asciiOnly = name.replace(/[^a-zA-Z0-9_-]/g, "");
@@ -73,35 +72,15 @@ function makeKRTimestamp() {
   const hh = String(now.getHours()).padStart(2, "0");
   const mm = String(now.getMinutes()).padStart(2, "0");
   const ss = String(now.getSeconds()).padStart(2, "0");
-  return `${hh}${mm}${ss}`; // 예: "071728"
-}
-
-// 원본 이미지를 PNG로 정규화
-async function toPng(buffer) {
-  return sharp(buffer).png().toBuffer();
-}
-
-// 버퍼 PNG로 변환 → 리사이즈(512x512, cover) → 다시 버퍼
-async function toPng512(buffer) {
-  return sharp(buffer)
-    .resize(512, 512, { fit: "cover" })
-    .png()
-    .toBuffer();
+  return `${hh}${mm}${ss}`; // "071728"
 }
 
 //
 // ─────────────────────────────
-// Dropbox 업로드 전용 함수
-// (공유 링크는 만들지 않는다. 아카이브만 한다.)
+// Dropbox 업로드 함수
+// (공유링크 만들지 않는다. 단순 저장만 한다.)
 // ─────────────────────────────
 //
-
-/**
- * Dropbox에 파일 업로드
- * @param {string} desiredPath 예: "/booth_uploads/guest_071728.png"
- * @param {Buffer} fileBytes
- * @returns {Promise<{path_lower: string, id: string, ...}>}
- */
 async function uploadToDropbox(desiredPath, fileBytes) {
   console.log("DEBUG dropbox token preview:", (DROPBOX_TOKEN || "").slice(0, 20));
   console.log("DEBUG dropbox upload path (requested):", desiredPath);
@@ -137,31 +116,21 @@ async function uploadToDropbox(desiredPath, fileBytes) {
   }
 
   console.log("✅ Dropbox upload success:", data.path_lower);
-  return data;
+  return data; // { path_lower, ... }
 }
 
 //
 // ─────────────────────────────
-// OpenAI 호출 (이미지 스타일 변환)
+// OpenAI 스타일 변환
+// (프런트에서 이미 512×512 PNG로 줄여서 보내줬다고 가정)
 // ─────────────────────────────
 //
-// 변경 핵심:
-// 1. Dropbox URL 안 쓴다.
-// 2. base64 → data URL 로 변환 후 image_url로 넘긴다.
-// 3. 응답에서 output_image를 꺼내서 PNG Buffer로 돌려준다.
-//
-
-/**
- * @param {Buffer} resizedBuffer 512x512 PNG buffer (사용자 입력 이미지)
- * @param {string} styleRefPath  로컬 스타일 참조 PNG 파일 경로
- * @returns {Promise<Buffer>}    결과물 PNG 바이너리 Buffer
- */
-async function stylizeWithGPT(resizedBuffer, styleRefPath) {
-  // 방문자 이미지 base64
-  const userB64 = resizedBuffer.toString("base64");
+async function stylizeWithGPT(userPngBuffer, styleRefPath) {
+  // 1. 사용자 이미지(512x512 PNG) → data URL
+  const userB64 = userPngBuffer.toString("base64");
   const userDataUrl = `data:image/png;base64,${userB64}`;
 
-  // 스타일 참조 이미지 base64
+  // 2. 스타일 레퍼런스 PNG → data URL
   let styleBuf;
   try {
     styleBuf = fs.readFileSync(styleRefPath);
@@ -175,9 +144,8 @@ async function stylizeWithGPT(resizedBuffer, styleRefPath) {
   console.log("DEBUG calling OpenAI with:");
   console.log("DEBUG OPENAI KEY preview:", (OPENAI_KEY || "").slice(0, 12));
 
-  // OpenAI 요청 바디
-  // image_url 필드에 data URL을 직접 넣는다.
-  // (image_data 대신 image_url)
+  // 3. OpenAI 요청 바디
+  // image_url 필드에 data URL을 넣는다 (image_data 대신 image_url)
   const gptRequestBody = {
     model: "gpt-4o-mini-2024-07-18",
     input: [
@@ -209,6 +177,7 @@ async function stylizeWithGPT(resizedBuffer, styleRefPath) {
     ]
   };
 
+  // 4. OpenAI 호출
   const resp = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -225,7 +194,7 @@ async function stylizeWithGPT(resizedBuffer, styleRefPath) {
     throw new Error("gpt style remix failed");
   }
 
-  // OpenAI 응답에서 base64 PNG 추출
+  // 5. OpenAI 응답에서 base64 PNG 뽑기
   let base64Image = null;
 
   if (
@@ -235,7 +204,7 @@ async function stylizeWithGPT(resizedBuffer, styleRefPath) {
     Array.isArray(result.output[0].content)
   ) {
     for (const chunk of result.output[0].content) {
-      // 예상 1: { type:"output_image", image:{ b64_json:"..." } }
+      // case 1: { type:"output_image", image:{ b64_json:"..." } }
       if (
         chunk.type === "output_image" &&
         chunk.image &&
@@ -244,7 +213,7 @@ async function stylizeWithGPT(resizedBuffer, styleRefPath) {
         base64Image = chunk.image.b64_json;
         break;
       }
-      // 예상 2: { type:"output_image", image:"iVBOR..." }
+      // case 2: { type:"output_image", image:"iVBOR..." }
       if (
         chunk.type === "output_image" &&
         typeof chunk.image === "string"
@@ -255,7 +224,7 @@ async function stylizeWithGPT(resizedBuffer, styleRefPath) {
     }
   }
 
-  // fallback (일부 구형 응답 스타일)
+  // fallback (다른 응답 스타일 대응)
   if (
     !base64Image &&
     result.data &&
@@ -273,7 +242,7 @@ async function stylizeWithGPT(resizedBuffer, styleRefPath) {
     throw new Error("no_image_in_gpt_response");
   }
 
-  // base64 → Buffer
+  // 6. 최종 PNG Buffer
   const outBytes = Buffer.from(base64Image, "base64");
   return outBytes;
 }
@@ -281,24 +250,22 @@ async function stylizeWithGPT(resizedBuffer, styleRefPath) {
 //
 // ─────────────────────────────
 // /upload 라우트
-// 프론트(FormData):
-//   nickname: "사용자닉네임"
-//   photo: (File)
+// 프런트(FormData)에서
+//   nickname: 문자열
+//   photo: 512x512 PNG Blob
+// 을 보낸다고 가정
 // ─────────────────────────────
 //
 app.post("/upload", upload.single("photo"), async (req, res) => {
   try {
     // 1. 닉네임 처리
     const rawNickname = req.body.nickname || "";
-    const cleanName = sanitizeName(rawNickname);
+    const cleanName = sanitizeName(rawNickname); // 경로 안전화
 
     // 2. 타임스탬프
     const stamp = makeKRTimestamp();
 
-    // 3. baseName
-    const baseName = `${cleanName}_${stamp}`;
-
-    // 4. 업로드된 파일 여부 확인
+    // 3. 업로드된 이미지 확인
     if (!req.file || !req.file.buffer) {
       return res.status(400).json({
         ok: false,
@@ -306,24 +273,14 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
       });
     }
 
-    const originalBuffer = req.file.buffer;
+    // 프런트에서 이미 512×512 PNG로 만든 걸 보내주고 있다.
+    // ⇒ 이걸 바로 stylizeWithGPT에 넣는다.
+    const captured512Buffer = req.file.buffer;
 
-    // 5. 원본을 PNG로 정규화 → Dropbox /booth_uploads 에 저장
-    const normalizedPngBuffer = await toPng(originalBuffer);
-    const originalDesiredPath = `/booth_uploads/${baseName}.png`;
-    const uploadedOriginal = await uploadToDropbox(
-      originalDesiredPath,
-      normalizedPngBuffer
-    );
-    const originalCanonicalPath = uploadedOriginal.path_lower;
-
-    // 6. 512x512 PNG 버전 생성
-    const resizedBuffer = await toPng512(originalBuffer);
-
-    // 7. GPT 스타일 변환 (이제 Dropbox 공유링크 없음, 바로 base64로)
+    // 4. 스타일 변환
     let stylizedBuffer;
     try {
-      stylizedBuffer = await stylizeWithGPT(resizedBuffer, STYLE_REF_LOCAL);
+      stylizedBuffer = await stylizeWithGPT(captured512Buffer, STYLE_REF_LOCAL);
     } catch (err) {
       console.error("❌ stylizeWithGPT failed:", err);
       return res.status(500).json({
@@ -334,19 +291,30 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
       });
     }
 
-    // 8. 변환된 이미지를 Dropbox /booth_outputs 에 저장 (아카이브)
-    const stylizedDesiredPath = `/booth_outputs/${baseName}_stylized.png`;
+    // 5. Dropbox에 저장 (원본/결과 둘 다 남기고 싶으면 둘 다 올림)
+    const baseName = `${cleanName}_${stamp}`;
+
+    // 5-1. 사용자가 찍은 512x512 PNG 저장
+    const capturedDropboxPath = `/booth_uploads/${baseName}.png`;
+    const uploadedCaptured = await uploadToDropbox(
+      capturedDropboxPath,
+      captured512Buffer
+    );
+    const capturedCanonicalPath = uploadedCaptured.path_lower;
+
+    // 5-2. 변환된 스타일 PNG 저장
+    const stylizedDropboxPath = `/booth_outputs/${baseName}_stylized.png`;
     const uploadedStylized = await uploadToDropbox(
-      stylizedDesiredPath,
+      stylizedDropboxPath,
       stylizedBuffer
     );
     const stylizedCanonicalPath = uploadedStylized.path_lower;
 
-    // 9. 성공 응답
+    // 6. 정상 응답
     return res.json({
       ok: true,
       message: "upload + stylize complete",
-      originalPath: originalCanonicalPath,
+      inputPath: capturedCanonicalPath,
       stylizedPath: stylizedCanonicalPath
     });
   } catch (err) {
