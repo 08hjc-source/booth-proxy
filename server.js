@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 10000;
 
 // Render 환경변수에 넣어둔 Dropbox 토큰을 읽는다.
 // 예: "Bearer sl.u.ABCDEFG....."
-const DROPBOX_TOKEN = process.env.DROPBOX_TOKEN;
+const DROPBOX_TOKEN = process.env.DROPBOX_REFRESH_TOKEN;
 
 // 바디가 JSON (nickname, photo) 로 들어오기 때문에 이거 필요
 app.use(express.json({ limit: "10mb" })); // base64 이미지라 용량 커질 수 있어서 limit 넉넉히
@@ -204,4 +204,5 @@ app.get("/status", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ booth-proxy server running on port ${PORT}`);
 });
+
 
