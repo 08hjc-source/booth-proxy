@@ -1,209 +1,196 @@
+// server.js
 import express from "express";
 import cors from "cors";
+import fetch from "node-fetch";
+import sharp from "sharp";
 
 const app = express();
-app.use(express.json({ limit: "15mb" }));
+const PORT = process.env.PORT || 10000;
+
+// Render 환경변수에 넣어둔 Dropbox 토큰을 읽는다.
+// 예: "Bearer sl.u.ABCDEFG....."
+const DROPBOX_TOKEN = process.env.DROPBOX_TOKEN;
+
+// 바디가 JSON (nickname, photo) 로 들어오기 때문에 이거 필요
+app.use(express.json({ limit: "10mb" })); // base64 이미지라 용량 커질 수 있어서 limit 넉넉히
 app.use(cors());
 
-// ====== CONFIG ======
-const DROPBOX_TOKEN = process.env.DROPBOX_TOKEN;
-const DROPBOX_UPLOAD_FOLDER = "/booth_uploads"; // 원본 저장 폴더
-const DROPBOX_STYLED_FOLDER = "/booth_styled";   // 변환본 저장 폴더
+// 임시 메모리: jobId -> { status, styledReady, styledDataUrl }
+const jobTable = {}; 
+// 실제 프로덕션에서는 이걸 메모리 말고 DB나 파일에 저장하는 게 맞지만 지금은 메모리로 진행
 
 
-// 닉네임 기반 파일명
-function makeSafeFilename(rawName) {
-  const cleaned = rawName.trim().replace(/[^가-힣a-zA-Z0-9_-]/g, "_");
+// small helper: base64 dataURL -> Buffer
+function dataURLtoBuffer(dataURL) {
+  // dataURL 예: "data:image/png;base64,AAAAAA..."
+  const matches = dataURL.match(/^data:(.+);base64,(.+)$/);
+  if (!matches) return null;
+  const base64 = matches[2];
+  return Buffer.from(base64, "base64");
+}
+
+// helper: make filename from nickname
+function makeSafeFilename(nickname) {
+  // 닉네임에 한글/특수문자 많으면 Dropbox API가 깨질 수 있어
+  // 그래서 우리가 했던 룰: "닉네임_시분초.png" 같은 짧은 ASCII만
+  // 여기선 그냥 jobId를 timestamp 기반으로 강제로 만들자.
+  // 프론트는 jobId만 중요하게 본다.
   const now = new Date();
   const hh = String(now.getHours()).padStart(2, "0");
   const mm = String(now.getMinutes()).padStart(2, "0");
   const ss = String(now.getSeconds()).padStart(2, "0");
   const stamp = `${hh}${mm}${ss}`;
-  return `${cleaned}_${stamp}.png`; // 예: 찬_071728.png
+
+  // 닉네임에서 @, 공백 등 몇 개만 제거, 한글은 날려서 안전하게 ascii만 남긴다.
+  const asciiNick = nickname
+    .replace(/[^a-zA-Z0-9_\-]/g, "") // 영문/숫자/언더바/대시만
+    .slice(0, 20) || "guest";
+
+  return `${asciiNick}_${stamp}.png`;
 }
 
-// Dropbox 업로드
-async function uploadToDropbox({ folder, filename, buffer }) {
+// helper: upload buffer to dropbox
+async function uploadToDropbox(buf, dropboxPath) {
   if (!DROPBOX_TOKEN) {
-    throw new Error("DROPBOX_TOKEN is missing on server");
+    console.error("❌ DROPBOX_TOKEN is missing in env");
+    throw new Error("no dropbox token");
   }
 
-  const dropboxPath = `${folder}/${filename}`;
   const resp = await fetch("https://content.dropboxapi.com/2/files/upload", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${DROPBOX_TOKEN}`,
-      "Content-Type": "application/octet-stream",
+      "Authorization": DROPBOX_TOKEN, // <-- Render env should store full "Bearer xxx"
       "Dropbox-API-Arg": JSON.stringify({
         path: dropboxPath,
         mode: "add",
         autorename: true,
         mute: false,
         strict_conflict: false
-      })
+      }),
+      "Content-Type": "application/octet-stream"
     },
-    body: buffer,
+    body: buf,
   });
 
   if (!resp.ok) {
-    const txt = await resp.text();
-    console.error("Dropbox upload fail (raw):", txt);
-    throw new Error("dropbox upload failed: " + txt);
+    const t = await resp.text();
+    console.error("Dropbox upload fail (raw):", t);
+    throw new Error("dropbox upload failed: " + t);
   }
 
   const data = await resp.json();
-  return data; // includes path_display
+  console.log("✅ Dropbox upload success:", data.path_lower);
+  return data;
 }
 
-// Dropbox 폴더 내 파일 목록 불러오기
-async function listDropboxFolder(folder) {
-  const resp = await fetch("https://api.dropboxapi.com/2/files/list_folder", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${DROPBOX_TOKEN}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      path: folder,
-      recursive: false,
-      include_media_info: false,
-      include_deleted: false,
-      include_has_explicit_shared_members: false,
-      include_mounted_folders: true,
-      limit: 2000
-    })
-  });
 
-  if (!resp.ok) {
-    const txt = await resp.text();
-    console.error("Dropbox list_folder fail (raw):", txt);
-    throw new Error("dropbox list_folder failed: " + txt);
-  }
-
-  const data = await resp.json();
-  return data.entries || [];
-}
-
-// Dropbox에서 특정 파일(이미지)을 다운로드해서 base64로 돌려주기
-async function downloadDropboxFile(pathLower) {
-  // pathLower 예: "/booth_styled/찬_071728__styled_2025-11-01-193500.png"
-  const resp = await fetch("https://content.dropboxapi.com/2/files/download", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${DROPBOX_TOKEN}`,
-      "Dropbox-API-Arg": JSON.stringify({
-        path: pathLower
-      })
-    }
-  });
-
-  if (!resp.ok) {
-    const txt = await resp.text();
-    console.error("Dropbox download fail (raw):", txt);
-    throw new Error("dropbox download failed: " + txt);
-  }
-
-  const arrayBuf = await resp.arrayBuffer();
-  const buff = Buffer.from(arrayBuf);
-  const b64 = buff.toString("base64");
-  // data URL로 만들어주면 프론트에서 바로 <img src="..."> 가능
-  return `data:image/png;base64,${b64}`;
-}
-
-// ============ ROUTES ============
-
-// 업로드 라우트
-// body: { nickname: "찬", photo: "data:image/png;base64,AAAA..." }
+// POST /upload
+// body: { nickname: string, photo: "data:image/png;base64,..." }
 app.post("/upload", async (req, res) => {
   try {
-    const { nickname, photo } = req.body;
-
+    const { nickname, photo } = req.body || {};
     if (!nickname || !photo) {
-      return res.status(400).json({ ok: false, error: "nickname or photo missing" });
+      return res.status(400).json({
+        ok: false,
+        error: "missing_nickname_or_photo"
+      });
     }
 
-    // dataURL 파싱
-    const match = photo.match(/^data:image\/\w+;base64,(.+)$/);
-    if (!match) {
-      return res.status(400).json({ ok: false, error: "photo is not valid dataURL" });
+    // dataURL -> Buffer
+    const rawBuf = dataURLtoBuffer(photo);
+    if (!rawBuf) {
+      return res.status(400).json({
+        ok: false,
+        error: "bad_photo_format"
+      });
     }
-    const b64 = match[1];
-    const imgBuffer = Buffer.from(b64, "base64");
 
-    // 파일명 생성 (jobId로도 사용)
-    const filename = makeSafeFilename(nickname); // 예: 찬_071728.png
+    // sharp로 512x512 png 정규화
+    const normBuf = await sharp(rawBuf)
+      .resize(512, 512, { fit: "cover" })
+      .png()
+      .toBuffer();
 
-    // Dropbox 업로드 (원본을 /booth_uploads에)
-    const dropResult = await uploadToDropbox({
-      folder: DROPBOX_UPLOAD_FOLDER,
-      filename,
-      buffer: imgBuffer
-    });
+    // 파일명 / Dropbox 경로
+    const jobFile = makeSafeFilename(nickname); // e.g. "guest_071728.png"
+    const dropboxPath = "/booth_uploads/" + jobFile;
 
-    // 프론트엔드(프레이머)한테 jobId를 알려준다
-    return res.json({
+    // Dropbox 업로드
+    await uploadToDropbox(normBuf, dropboxPath);
+
+    // 메모리에 job 등록
+    jobTable[jobFile] = {
+      status: "uploaded",   // 업로드 완료
+      styledReady: false,   // 아직 변환 안됨
+      styledDataUrl: null,  // 변환 후 dataURL 들어올 자리
+    };
+
+    // 프론트는 jobId만 기억해뒀다가 /status?jobId=... 로 계속 물어본다
+    res.json({
       ok: true,
-      jobId: filename,             // 이게 이후 /status에 쓸 키
-      stored: dropResult.path_display
+      jobId: jobFile,
+      message: "upload_success_wait_for_style"
     });
   } catch (err) {
-    console.error("서버 내부 오류:", err);
-    return res.status(500).json({ ok: false, error: "internal server error" });
+    console.error("POST /upload error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "server_error",
+      message: err.message || String(err),
+    });
   }
 });
 
 
-// 상태 확인 라우트
-// 프레이머 쪽에서 /status?jobId=찬_071728.png 로 계속 물어보는 형태
+// GET /status?jobId=xxxx.png
+// -> {ok:true, done:false} | {ok:true, done:true, previewDataUrl:"data:image/png;base64,...."}
 app.get("/status", async (req, res) => {
   try {
     const jobId = req.query.jobId;
-    if (!jobId) {
-      return res.status(400).json({ ok: false, error: "missing jobId" });
+    if (!jobId || !jobTable[jobId]) {
+      return res.json({
+        ok: false,
+        error: "no_such_job"
+      });
     }
 
-    // 예: jobId = "찬_071728.png"
-    // 변환된 결과는 "찬_071728__styled_..." 이런 식으로 나오니까
-    // "찬_071728" 부분만 뽑아서 startsWith로 매칭한다
-    const baseName = jobId.replace(/\.png$/i, "");
+    const jobInfo = jobTable[jobId];
 
-    // 1) 스타일 결과 폴더를 스캔
-    const entries = await listDropboxFolder(DROPBOX_STYLED_FOLDER);
-    // entries 안에는 {name, path_lower, .tag:"file", ...} 등이 들어있음
+    // 여기서 진짜 구현은:
+    //
+    // 1. Dropbox의 /booth_styled/{jobId} 같은 위치를 확인한다.
+    // 2. 거기 파일이 있으면 다운로드해서 base64로 읽어서 styledDataUrl 채우고
+    //    jobInfo.styledReady=true 로 바꾼다.
+    //
+    // 지금은 네 로컬 자동 파이프라인(ComfyUI→Dropbox 업로드)이 완성되기 전이니까
+    // 임시로 "아직 변환 안 끝났음"만 준다.
+    //
+    // ↓↓↓ 나중에 여기서 실제 Dropbox에서 결과 png를 읽어서 dataURL 만들면 된다.
 
-    // 2) baseName으로 시작하는 파일 중 하나 고르자
-    //    예: jobId = 찬_071728.png
-    //    결과: 찬_071728__styled_2025-11-01-193500.png
-    const hit = entries.find(e => {
-      return e[".tag"] === "file" && e.name.startsWith(baseName + "__styled_");
-    });
-
-    if (!hit) {
-      // 아직 변환 안 끝남
-      return res.json({ ok: true, done: false });
+    if (!jobInfo.styledReady) {
+        return res.json({
+            ok: true,
+            done: false // 아직 변환 안 끝남
+        });
     }
 
-    // 3) 찾았다 → 그 파일을 실제로 다운로드해서 base64 dataURL로 리턴
-    const dataUrl = await downloadDropboxFile(hit.path_lower);
-
+    // 만약 styledReady=true 라면:
     return res.json({
       ok: true,
       done: true,
-      fileName: hit.name,
-      previewDataUrl: dataUrl // 프레이머 <img src={previewDataUrl} />
+      previewDataUrl: jobInfo.styledDataUrl, // "data:image/png;base64,...."
     });
+
   } catch (err) {
-    console.error("status check error:", err);
-    return res.status(500).json({ ok: false, error: "internal server error" });
+    console.error("GET /status error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "server_error",
+      message: err.message || String(err),
+    });
   }
 });
 
-// health check
-app.get("/", (req, res) => {
-  res.send("booth upload server alive");
-});
-
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ booth upload server running on ${PORT}`);
+  console.log(`✅ booth-proxy server running on port ${PORT}`);
 });
