@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 10000;
 
 // Render 환경변수에 넣어둔 Dropbox 토큰을 읽는다.
 // 예: "Bearer sl.u.ABCDEFG....."
-const DROPBOX_TOKEN = process.env.DROPBOX_REFRESH_TOKEN;
+const DROPBOX_REFRESH_TOKEN = process.env.DROPBOX_REFRESH_TOKEN;
 
 // 바디가 JSON (nickname, photo) 로 들어오기 때문에 이거 필요
 app.use(express.json({ limit: "10mb" })); // base64 이미지라 용량 커질 수 있어서 limit 넉넉히
@@ -51,7 +51,7 @@ function makeSafeFilename(nickname) {
 
 // helper: upload buffer to dropbox
 async function uploadToDropbox(buf, dropboxPath) {
-  const rawToken = process.env.DROPBOX_TOKEN || "";
+  const rawToken = process.env.DROPBOX_REFRESH_TOKEN || "";
 
   // 1) rawToken이 "Bearer xxxxx"로 들어온 경우 -> "xxxxx"만 뽑아내
   // 2) rawToken이 "sl.u.xxxxx"처럼 Bearer 없이 들어온 경우 -> 그대로 쓴다
@@ -61,7 +61,7 @@ async function uploadToDropbox(buf, dropboxPath) {
   const authHeader = "Bearer " + cleanedToken;
 
   if (!cleanedToken) {
-    console.error("❌ DROPBOX_TOKEN missing or empty after cleaning");
+    console.error("❌ DROPBOX_REFRESH_TOKEN missing or empty after cleaning");
     throw new Error("no dropbox token");
   }
 
@@ -204,5 +204,6 @@ app.get("/status", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ booth-proxy server running on port ${PORT}`);
 });
+
 
 
