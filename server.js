@@ -51,15 +51,24 @@ function makeSafeFilename(nickname) {
 
 // helper: upload buffer to dropbox
 async function uploadToDropbox(buf, dropboxPath) {
-  if (!DROPBOX_TOKEN) {
-    console.error("❌ DROPBOX_TOKEN is missing in env");
+  const rawToken = process.env.DROPBOX_TOKEN || "";
+
+  // 1) rawToken이 "Bearer xxxxx"로 들어온 경우 -> "xxxxx"만 뽑아내
+  // 2) rawToken이 "sl.u.xxxxx"처럼 Bearer 없이 들어온 경우 -> 그대로 쓴다
+  const cleanedToken = rawToken.replace(/^Bearer\s+/i, "").trim();
+
+  // 최종 Authorization 헤더는 항상 "Bearer {순수토큰}"
+  const authHeader = "Bearer " + cleanedToken;
+
+  if (!cleanedToken) {
+    console.error("❌ DROPBOX_TOKEN missing or empty after cleaning");
     throw new Error("no dropbox token");
   }
 
   const resp = await fetch("https://content.dropboxapi.com/2/files/upload", {
     method: "POST",
     headers: {
-      "Authorization": DROPBOX_TOKEN, // <-- Render env should store full "Bearer xxx"
+      "Authorization": authHeader,
       "Dropbox-API-Arg": JSON.stringify({
         path: dropboxPath,
         mode: "add",
@@ -82,6 +91,7 @@ async function uploadToDropbox(buf, dropboxPath) {
   console.log("✅ Dropbox upload success:", data.path_lower);
   return data;
 }
+
 
 
 // POST /upload
@@ -194,3 +204,4 @@ app.get("/status", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ booth-proxy server running on port ${PORT}`);
 });
+
