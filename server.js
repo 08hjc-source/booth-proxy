@@ -1,495 +1,209 @@
 import express from "express";
-import multer from "multer";
-import fetch from "node-fetch";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-
-//
-// ─────────────────────────────
-// 기본 세팅
-// ─────────────────────────────
-//
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import cors from "cors";
 
 const app = express();
-app.use(express.json({ limit: "20mb" }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "15mb" }));
+app.use(cors());
 
-// ─────────────────────────────
-// 환경변수 (Render 대시보드에 등록해야 함)
-// ─────────────────────────────
-//
-// 필수:
-//   DROPBOX_REFRESH_TOKEN=   (네가 방금 발급받은 refresh_token)
-//   DROPBOX_APP_KEY=         (Dropbox app key)
-//   DROPBOX_APP_SECRET=      (Dropbox app secret)
-//   OPENAI_KEY=              (OpenAI API Key)
-//
-const DROPBOX_REFRESH_TOKEN = process.env.DROPBOX_REFRESH_TOKEN || "";
-const DROPBOX_APP_KEY = process.env.DROPBOX_APP_KEY || "";
-const DROPBOX_APP_SECRET = process.env.DROPBOX_APP_SECRET || "";
-const OPENAI_KEY = process.env.OPENAI_KEY || "";
+// ====== CONFIG ======
+const DROPBOX_TOKEN = process.env.DROPBOX_TOKEN;
+const DROPBOX_UPLOAD_FOLDER = "/booth_uploads"; // 원본 저장 폴더
+const DROPBOX_STYLED_FOLDER = "/booth_styled";   // 변환본 저장 폴더
 
-if (!DROPBOX_REFRESH_TOKEN) {
-  console.warn("⚠️ DROPBOX_REFRESH_TOKEN not set");
-}
-if (!DROPBOX_APP_KEY) {
-  console.warn("⚠️ DROPBOX_APP_KEY not set");
-}
-if (!DROPBOX_APP_SECRET) {
-  console.warn("⚠️ DROPBOX_APP_SECRET not set");
-}
-if (!OPENAI_KEY) {
-  console.warn("⚠️ OPENAI_KEY not set");
-}
 
-// ─────────────────────────────
-// Dropbox 액세스 토큰 관리
-// ─────────────────────────────
-//
-// Dropbox는 이제 long-lived access token을 안 주고
-// refresh_token으로 short-lived access token을 계속 갱신하는 구조다.
-//
-// 여기서는 서버 프로세스 메모리에
-// currentAccessToken 과 만료 예정 시각을 들고 있다가
-// 만료되면 자동으로 새 토큰을 받아온다.
-//
-
-let currentAccessToken = "";
-let accessTokenExpiresAt = 0; // ms timestamp
-
-// 내부 유틸: 실제 Dropbox access_token 새로 발급
-async function fetchNewDropboxAccessToken() {
-  const resp = await fetch("https://api.dropbox.com/oauth2/token", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: DROPBOX_REFRESH_TOKEN,
-      client_id: DROPBOX_APP_KEY,
-      client_secret: DROPBOX_APP_SECRET,
-    }),
-  });
-
-  const data = await resp.json();
-
-  if (!resp.ok) {
-    console.error("❌ Dropbox token refresh 실패:", data);
-    throw new Error("Dropbox refresh 실패");
-  }
-
-  // data.access_token 은 짧게 유효한 bearer token
-  // data.expires_in 은 초 단위 유효기간 (예: 14400 = 4시간)
-  currentAccessToken = data.access_token || "";
-  const lifetimeSec = data.expires_in || 60 * 60; // fallback 1h
-  accessTokenExpiresAt = Date.now() + lifetimeSec * 1000;
-
-  console.log(
-    "✅ Dropbox access_token 갱신 완료:",
-    currentAccessToken.slice(0, 10) + "...",
-    "유효(ms until exp):",
-    lifetimeSec * 1000
-  );
-
-  return currentAccessToken;
-}
-
-// 외부에서 Dropbox 쓰기 전에 호출해서
-// 항상 유효한 토큰을 돌려주는 헬퍼
-async function ensureDropboxAccessToken() {
-  const now = Date.now();
-
-  // 토큰이 없거나 만료 임박(여기서는 30초 미만 남으면 갱신)하면 새로 발급
-  if (
-    !currentAccessToken ||
-    now > accessTokenExpiresAt - 30 * 1000
-  ) {
-    return await fetchNewDropboxAccessToken();
-  }
-
-  return currentAccessToken;
-}
-
-//
-// ─────────────────────────────
-// multer 설정
-// 프론트에서 256x256 PNG Blob으로 전송한다고 가정
-// ─────────────────────────────
-//
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: {
-    fileSize: 15 * 1024 * 1024, // 15MB
-  },
-});
-
-//
-// ─────────────────────────────
-// 유틸 함수
-// ─────────────────────────────
-function sanitizeName(name) {
-  if (!name) return "guest";
-  const asciiOnly = name.replace(/[^a-zA-Z0-9_-]/g, "");
-  return asciiOnly.length > 0 ? asciiOnly : "guest";
-}
-
-function makeKRTimestamp() {
-  const now = new Date(Date.now() + 9 * 60 * 60 * 1000);
+// 닉네임 기반 파일명
+function makeSafeFilename(rawName) {
+  const cleaned = rawName.trim().replace(/[^가-힣a-zA-Z0-9_-]/g, "_");
+  const now = new Date();
   const hh = String(now.getHours()).padStart(2, "0");
   const mm = String(now.getMinutes()).padStart(2, "0");
   const ss = String(now.getSeconds()).padStart(2, "0");
-  return `${hh}${mm}${ss}`; // 예: "134512"
+  const stamp = `${hh}${mm}${ss}`;
+  return `${cleaned}_${stamp}.png`; // 예: 찬_071728.png
 }
 
-// 스타일 기준 이미지 (반드시 repo에 포함되어야 함)
-// 권장: 192x192 또는 256x256 PNG
-const STYLE_REF_LOCAL = path.join(__dirname, "assets", "style_ref_all.png");
+// Dropbox 업로드
+async function uploadToDropbox({ folder, filename, buffer }) {
+  if (!DROPBOX_TOKEN) {
+    throw new Error("DROPBOX_TOKEN is missing on server");
+  }
 
-//
-// ─────────────────────────────
-// Dropbox 업로드 (공유링크 X, 내부 기록용)
-// Authorization 헤더는 ensureDropboxAccessToken()으로 항상 최신 토큰 사용
-// ─────────────────────────────
-async function uploadToDropbox(dropboxPath, fileBytes) {
-  console.log("DEBUG dropbox upload path:", dropboxPath);
-
-  // 유효한 access_token 확보
-  const accessToken = await ensureDropboxAccessToken();
-
+  const dropboxPath = `${folder}/${filename}`;
   const resp = await fetch("https://content.dropboxapi.com/2/files/upload", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${accessToken}`,
+      "Authorization": `Bearer ${DROPBOX_TOKEN}`,
+      "Content-Type": "application/octet-stream",
       "Dropbox-API-Arg": JSON.stringify({
         path: dropboxPath,
         mode: "add",
         autorename: true,
         mute: false,
-        strict_conflict: false,
-      }),
-      "Content-Type": "application/octet-stream",
+        strict_conflict: false
+      })
     },
-    body: fileBytes,
+    body: buffer,
   });
 
-  const rawText = await resp.text();
-  let data;
-  try {
-    data = JSON.parse(rawText);
-  } catch (e) {
-    console.error("Dropbox upload parse fail:", rawText);
-    throw new Error("dropbox upload failed (invalid JSON)");
-  }
-
   if (!resp.ok) {
-    console.error("❌ Dropbox upload fail:", data);
-    throw new Error("dropbox upload failed");
+    const txt = await resp.text();
+    console.error("Dropbox upload fail (raw):", txt);
+    throw new Error("dropbox upload failed: " + txt);
   }
 
-  console.log("✅ Dropbox upload success:", data.path_lower);
-  return data;
+  const data = await resp.json();
+  return data; // includes path_display
 }
 
-//
-// ─────────────────────────────
-// OpenAI 스타일 변환 로직
-// (프런트에서 이미 256x256 PNG를 보냈다고 가정)
-// ─────────────────────────────
-async function stylizeWithGPT(userPngBuffer) {
-  // 1. 사용자 이미지 → data URL
-  const userB64 = userPngBuffer.toString("base64");
-  const userDataUrl = `data:image/png;base64,${userB64}`;
-
-  // 2. 스타일 레퍼런스 이미지 → data URL
-  let styleBuf;
-  try {
-    styleBuf = fs.readFileSync(STYLE_REF_LOCAL);
-  } catch (e) {
-    console.error("❌ style reference load failed:", e);
-    return {
-      ok: false,
-      errorType: "style_ref_missing",
-      message: "스타일 기준 이미지가 없습니다.",
-    };
-  }
-  const styleB64 = styleBuf.toString("base64");
-  const styleDataUrl = `data:image/png;base64,${styleB64}`;
-
-  // 3. 짧은 프롬프트 (토큰 절약)
-  const promptText =
-    "Apply the second image's style to the first person. " +
-    "Keep pose, hair, and clothing colors. " +
-    "Clean linework, flat fills, minimal shading. " +
-    "White background only. No text.";
-
-  // 4. OpenAI 요청 바디
-  const gptRequestBody = {
-    model: "gpt-4o-mini-2024-07-18",
-    input: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "input_text",
-            text: promptText,
-          },
-          {
-            type: "input_image",
-            image_url: userDataUrl,
-          },
-          {
-            type: "input_image",
-            image_url: styleDataUrl,
-          },
-        ],
-      },
-    ],
-  };
-
-  // 5. 실제 호출
-  const resp = await fetch("https://api.openai.com/v1/responses", {
+// Dropbox 폴더 내 파일 목록 불러오기
+async function listDropboxFolder(folder) {
+  const resp = await fetch("https://api.dropboxapi.com/2/files/list_folder", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${OPENAI_KEY}`,
-      "Content-Type": "application/json",
+      "Authorization": `Bearer ${DROPBOX_TOKEN}`,
+      "Content-Type": "application/json"
     },
-    body: JSON.stringify(gptRequestBody),
+    body: JSON.stringify({
+      path: folder,
+      recursive: false,
+      include_media_info: false,
+      include_deleted: false,
+      include_has_explicit_shared_members: false,
+      include_mounted_folders: true,
+      limit: 2000
+    })
   });
-
-  const result = await resp.json();
 
   if (!resp.ok) {
-    console.error("GPT style remix fail:", result);
-
-    // rate limit은 따로 프런트에서 안내할 수 있게 구분
-    if (result?.error?.code === "rate_limit_exceeded") {
-      return {
-        ok: false,
-        errorType: "rate_limit",
-        message:
-          "요청이 많아 변환이 지연 중입니다. 잠시 후 다시 시도해주세요.",
-      };
-    }
-
-    return {
-      ok: false,
-      errorType: "openai_error",
-      message: "스타일 변환 실패 (API 오류)",
-    };
+    const txt = await resp.text();
+    console.error("Dropbox list_folder fail (raw):", txt);
+    throw new Error("dropbox list_folder failed: " + txt);
   }
 
-  // 6. OpenAI 응답에서 base64 PNG 추출
-  let base64Image = null;
-
-  if (
-    result.output &&
-    Array.isArray(result.output) &&
-    result.output[0] &&
-    Array.isArray(result.output[0].content)
-  ) {
-    for (const chunk of result.output[0].content) {
-      if (
-        chunk.type === "output_image" &&
-        chunk.image &&
-        typeof chunk.image.b64_json === "string"
-      ) {
-        base64Image = chunk.image.b64_json;
-        break;
-      }
-      if (
-        chunk.type === "output_image" &&
-        typeof chunk.image === "string"
-      ) {
-        base64Image = chunk.image;
-        break;
-      }
-    }
-  }
-
-  // fallback 구조
-  if (
-    !base64Image &&
-    result.data &&
-    result.data[0] &&
-    result.data[0].b64_json
-  ) {
-    base64Image = result.data[0].b64_json;
-  }
-
-  if (!base64Image) {
-    console.warn(
-      "⚠️ GPT did not return an image. Full result:",
-      JSON.stringify(result, null, 2)
-    );
-    return {
-      ok: false,
-      errorType: "no_image",
-      message: "이미지 결과를 받지 못했습니다.",
-    };
-  }
-
-  // 최종 PNG Buffer
-  const outBytes = Buffer.from(base64Image, "base64");
-  return {
-    ok: true,
-    buffer: outBytes,
-  };
+  const data = await resp.json();
+  return data.entries || [];
 }
 
-//
-// ─────────────────────────────
-// 큐(Queue) 구현
-// 동시에 여러 명이 제출해도 OpenAI 호출은 직렬 처리하도록 해서
-// 분당 토큰 한도(TPM) 폭발 방지
-// ─────────────────────────────
-const jobQueue = [];
-let queueBusy = false;
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-function enqueueStylize(userPngBuffer) {
-  return new Promise((resolve) => {
-    jobQueue.push({ userPngBuffer, resolve });
-    if (!queueBusy) {
-      processQueue();
+// Dropbox에서 특정 파일(이미지)을 다운로드해서 base64로 돌려주기
+async function downloadDropboxFile(pathLower) {
+  // pathLower 예: "/booth_styled/찬_071728__styled_2025-11-01-193500.png"
+  const resp = await fetch("https://content.dropboxapi.com/2/files/download", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${DROPBOX_TOKEN}`,
+      "Dropbox-API-Arg": JSON.stringify({
+        path: pathLower
+      })
     }
   });
+
+  if (!resp.ok) {
+    const txt = await resp.text();
+    console.error("Dropbox download fail (raw):", txt);
+    throw new Error("dropbox download failed: " + txt);
+  }
+
+  const arrayBuf = await resp.arrayBuffer();
+  const buff = Buffer.from(arrayBuf);
+  const b64 = buff.toString("base64");
+  // data URL로 만들어주면 프론트에서 바로 <img src="..."> 가능
+  return `data:image/png;base64,${b64}`;
 }
 
-async function processQueue() {
-  queueBusy = true;
-  while (jobQueue.length > 0) {
-    const job = jobQueue.shift();
+// ============ ROUTES ============
 
-    const result = await stylizeWithGPT(job.userPngBuffer).catch((e) => {
-      console.error("stylizeWithGPT threw:", e);
-      return {
-        ok: false,
-        errorType: "queue_internal_error",
-        message: String(e?.message || e),
-      };
+// 업로드 라우트
+// body: { nickname: "찬", photo: "data:image/png;base64,AAAA..." }
+app.post("/upload", async (req, res) => {
+  try {
+    const { nickname, photo } = req.body;
+
+    if (!nickname || !photo) {
+      return res.status(400).json({ ok: false, error: "nickname or photo missing" });
+    }
+
+    // dataURL 파싱
+    const match = photo.match(/^data:image\/\w+;base64,(.+)$/);
+    if (!match) {
+      return res.status(400).json({ ok: false, error: "photo is not valid dataURL" });
+    }
+    const b64 = match[1];
+    const imgBuffer = Buffer.from(b64, "base64");
+
+    // 파일명 생성 (jobId로도 사용)
+    const filename = makeSafeFilename(nickname); // 예: 찬_071728.png
+
+    // Dropbox 업로드 (원본을 /booth_uploads에)
+    const dropResult = await uploadToDropbox({
+      folder: DROPBOX_UPLOAD_FOLDER,
+      filename,
+      buffer: imgBuffer
     });
 
-    job.resolve(result);
-
-    // 호출 사이 텀: TPM 급발진 방지
-    await sleep(1500);
-  }
-  queueBusy = false;
-}
-
-//
-// ─────────────────────────────
-// /upload 라우트
-// 프론트(FormData):
-//   nickname: string
-//   photo:    Blob(256x256 PNG or 192x192 PNG)
-// ─────────────────────────────
-app.post("/upload", upload.single("photo"), async (req, res) => {
-  try {
-    const rawNickname = req.body.nickname || "";
-    const cleanName = sanitizeName(rawNickname);
-    const stamp = makeKRTimestamp();
-
-    if (!req.file || !req.file.buffer) {
-      return res.status(400).json({
-        ok: false,
-        message: "이미지가 없습니다.",
-      });
-    }
-
-    // 프론트에서 이미 정사각 PNG로 보낸다.
-    const capturedBuffer = req.file.buffer;
-
-    // OpenAI 스타일 변환은 큐에 넣어 순차 처리
-    const styleResult = await enqueueStylize(capturedBuffer);
-
-    if (!styleResult.ok) {
-      // 변환 실패해도, 업로드된 원본은 Dropbox에 남겨서 보관
-      const failBase = `${cleanName}_${stamp}_fail`;
-      const capturedFailPath = `/booth_uploads/${failBase}.png`;
-
-      try {
-        await uploadToDropbox(capturedFailPath, capturedBuffer);
-      } catch (e) {
-        console.error("Dropbox backup fail upload error:", e);
-      }
-
-      // 프론트에 사유 그대로 전달
-      return res.status(429).json({
-        ok: false,
-        step: "stylize",
-        errorType: styleResult.errorType,
-        message: styleResult.message,
-      });
-    }
-
-    // 스타일 변환까지 성공
-    const baseName = `${cleanName}_${stamp}`;
-
-    // 1) 입력 이미지 저장
-    const capturedDropboxPath = `/booth_uploads/${baseName}.png`;
-    const upIn = await uploadToDropbox(
-      capturedDropboxPath,
-      capturedBuffer
-    );
-    const capturedCanonicalPath = upIn.path_lower;
-
-    // 2) 변환 결과 저장
-    const stylizedDropboxPath = `/booth_outputs/${baseName}_stylized.png`;
-    const upOut = await uploadToDropbox(
-      stylizedDropboxPath,
-      styleResult.buffer
-    );
-    const stylizedCanonicalPath = upOut.path_lower;
-
-    // 프론트 응답
+    // 프론트엔드(프레이머)한테 jobId를 알려준다
     return res.json({
       ok: true,
-      message: "upload + stylize complete",
-      inputPath: capturedCanonicalPath,
-      stylizedPath: stylizedCanonicalPath,
+      jobId: filename,             // 이게 이후 /status에 쓸 키
+      stored: dropResult.path_display
     });
   } catch (err) {
     console.error("서버 내부 오류:", err);
-    return res.status(500).json({
-      ok: false,
-      message: "server error",
-      details: String(err.message || err),
-    });
+    return res.status(500).json({ ok: false, error: "internal server error" });
   }
 });
 
-//
-// 헬스 체크
-//
-app.get("/health", async (req, res) => {
-  // 드롭박스 토큰이 지금 유효한지도 같이 체크해주면 운영자가 보기 편함
-  let dropboxOk = true;
+
+// 상태 확인 라우트
+// 프레이머 쪽에서 /status?jobId=찬_071728.png 로 계속 물어보는 형태
+app.get("/status", async (req, res) => {
   try {
-    await ensureDropboxAccessToken();
-  } catch (e) {
-    dropboxOk = false;
-  }
+    const jobId = req.query.jobId;
+    if (!jobId) {
+      return res.status(400).json({ ok: false, error: "missing jobId" });
+    }
 
-  res.json({
-    ok: true,
-    dropboxAuth: dropboxOk,
-    status: "alive",
-  });
+    // 예: jobId = "찬_071728.png"
+    // 변환된 결과는 "찬_071728__styled_..." 이런 식으로 나오니까
+    // "찬_071728" 부분만 뽑아서 startsWith로 매칭한다
+    const baseName = jobId.replace(/\.png$/i, "");
+
+    // 1) 스타일 결과 폴더를 스캔
+    const entries = await listDropboxFolder(DROPBOX_STYLED_FOLDER);
+    // entries 안에는 {name, path_lower, .tag:"file", ...} 등이 들어있음
+
+    // 2) baseName으로 시작하는 파일 중 하나 고르자
+    //    예: jobId = 찬_071728.png
+    //    결과: 찬_071728__styled_2025-11-01-193500.png
+    const hit = entries.find(e => {
+      return e[".tag"] === "file" && e.name.startsWith(baseName + "__styled_");
+    });
+
+    if (!hit) {
+      // 아직 변환 안 끝남
+      return res.json({ ok: true, done: false });
+    }
+
+    // 3) 찾았다 → 그 파일을 실제로 다운로드해서 base64 dataURL로 리턴
+    const dataUrl = await downloadDropboxFile(hit.path_lower);
+
+    return res.json({
+      ok: true,
+      done: true,
+      fileName: hit.name,
+      previewDataUrl: dataUrl // 프레이머 <img src={previewDataUrl} />
+    });
+  } catch (err) {
+    console.error("status check error:", err);
+    return res.status(500).json({ ok: false, error: "internal server error" });
+  }
 });
 
-//
-// 서버 시작
-//
-const PORT = process.env.PORT || 10000;
+// health check
+app.get("/", (req, res) => {
+  res.send("booth upload server alive");
+});
+
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 booth-proxy running on :${PORT}`);
+  console.log(`✅ booth upload server running on ${PORT}`);
 });
