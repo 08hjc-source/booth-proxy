@@ -19,11 +19,11 @@ const app = express();
 app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// Render 환경변수
+// 환경 변수
 let DROPBOX_TOKEN = process.env.DROPBOX_TOKEN || "";
 let OPENAI_KEY = process.env.OPENAI_KEY || "";
 
-// 혹시 "Bearer xxx" 없이 토큰만 들어온 경우를 대비해 헤더용으로 정규화
+// Dropbox Authorization 헤더용 래퍼
 function dbxAuthHeader() {
   if (DROPBOX_TOKEN.startsWith("Bearer ")) {
     return DROPBOX_TOKEN;
@@ -38,9 +38,9 @@ if (!OPENAI_KEY) {
   console.warn("⚠️ OPENAI_KEY not set");
 }
 
-// 전시 스타일 참조 이미지(사전에 Dropbox에 올려둔 것)의 경로
-// 예: "/style/style_ref_all.png"
-const STYLE_DBX_PATH = "/style/style_ref_all.png";
+// 스타일 참조 이미지를 로컬 파일로 둔다.
+// server.js와 같은 폴더 기준 ./assets/style_ref_all.png 에 넣어둘 것
+const STYLE_REF_LOCAL = path.join(__dirname, "assets", "style_ref_all.png");
 
 //
 // ─────────────────────────────
@@ -91,13 +91,9 @@ async function toPng512(buffer) {
 
 //
 // ─────────────────────────────
-// Dropbox 관련
+// Dropbox 업로드 전용 함수
+//  (공유 링크는 이제 만들지 않는다)
 // ─────────────────────────────
-//
-// Dropbox API 주의점
-// - upload 응답에 path_lower가 온다. Dropbox가 실제 인지하는 canonical 경로다.
-// - 이후 공유 링크 생성 시 반드시 이 canonical 경로를 사용해야 한다.
-// - App Folder 권한일 경우 path_lower는 앱 루트 기준 경로이므로 반드시 그대로 써야 함.
 //
 
 /**
@@ -140,125 +136,9 @@ async function uploadToDropbox(desiredPath, fileBytes) {
     throw new Error("dropbox upload failed");
   }
 
-  // 성공 시 Dropbox가 인식하는 실제 경로(path_lower)를 쓴다.
+  // Dropbox가 실제 인식하는 경로(canonical)
   console.log("✅ Dropbox upload success:", data.path_lower);
   return data;
-}
-
-/**
- * Dropbox 공유 URL 획득
- * 1) create_shared_link_with_settings 시도
- * 2) 이미 있으면 list_shared_links
- * 3) 그래도 안 되면 files/get_temporary_link fallback
- *
- * @param {string} canonicalPath Dropbox 상의 실제 경로 (upload 응답의 path_lower 그대로 쓸 것)
- * @returns {Promise<string>} 공개 접근 가능한 URL (이미지 직접 접근 가능한 형태)
- */
-async function getDropboxPublicUrl(canonicalPath) {
-  // 1차 시도: create_shared_link_with_settings
-  let resp = await fetch(
-    "https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings",
-    {
-      method: "POST",
-      headers: {
-        Authorization: dbxAuthHeader(),
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        path: canonicalPath,
-        settings: { requested_visibility: "public" }
-      })
-    }
-  );
-
-  let data = await resp.json();
-
-  if (!resp.ok) {
-    // 공유 링크가 이미 있었을 가능성 등
-    const alreadyExists =
-      data &&
-      data.error &&
-      (data.error[".tag"] === "shared_link_already_exists" ||
-        data.error[".tag"] === "conflict"); // 일반적으로 409류
-
-    if (alreadyExists) {
-      // 2차 시도: list_shared_links
-      const resp2 = await fetch(
-        "https://api.dropboxapi.com/2/sharing/list_shared_links",
-        {
-          method: "POST",
-          headers: {
-            Authorization: dbxAuthHeader(),
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            path: canonicalPath,
-            direct_only: true
-          })
-        }
-      );
-
-      const data2 = await resp2.json();
-      if (resp2.ok && data2.links && data2.links.length > 0) {
-        data = { url: data2.links[0].url };
-      } else {
-        console.warn("Dropbox list_shared_links fallback failed:", data2);
-
-        // 3차 시도: files/get_temporary_link
-        const resp3 = await fetch(
-          "https://api.dropboxapi.com/2/files/get_temporary_link",
-          {
-            method: "POST",
-            headers: {
-              Authorization: dbxAuthHeader(),
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({ path: canonicalPath })
-          }
-        );
-        const data3 = await resp3.json();
-        if (!resp3.ok || !data3.link) {
-          console.error("Dropbox temp link fail:", data3);
-          throw new Error("dropbox share link failed (no link)");
-        }
-        console.log("DEBUG dropbox temp link (fallback):", data3.link);
-        return data3.link; // 이미 직접 접근 가능한 https URL
-      }
-    } else {
-      // not_found 등 근본적으로 경로를 못 찾은 경우
-      console.error("Dropbox share link fail:", data);
-      // 마지막으로 get_temporary_link를 시도해 본다.
-      const resp3 = await fetch(
-        "https://api.dropboxapi.com/2/files/get_temporary_link",
-        {
-          method: "POST",
-          headers: {
-            Authorization: dbxAuthHeader(),
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({ path: canonicalPath })
-        }
-      );
-      const data3 = await resp3.json();
-      if (!resp3.ok || !data3.link) {
-        console.error("Dropbox temp link fail:", data3);
-        throw new Error("dropbox share link failed");
-      }
-      console.log("DEBUG dropbox temp link (fallback):", data3.link);
-      return data3.link;
-    }
-  }
-
-  // 여기까지 왔으면 data.url은 예: "https://www.dropbox.com/s/abc123/file.png?dl=0"
-  let publicUrl = data.url;
-  if (publicUrl.includes("dl=0")) {
-    publicUrl = publicUrl.replace("dl=0", "dl=1");
-  } else if (!publicUrl.includes("dl=")) {
-    publicUrl += (publicUrl.includes("?") ? "&" : "?") + "dl=1";
-  }
-
-  console.log("DEBUG dropbox public url:", publicUrl);
-  return publicUrl;
 }
 
 //
@@ -266,47 +146,41 @@ async function getDropboxPublicUrl(canonicalPath) {
 // OpenAI 호출 (이미지 스타일 변환)
 // ─────────────────────────────
 //
-// 1) 방문자 이미지(512x512 PNG)를 Dropbox /booth_temp/... 로 업로드
-//    → canonical path 확보
-// 2) 그 canonical path로부터 public URL 확보
-// 3) style_ref_all.png 도 동일하게 public URL 확보
-// 4) /v1/responses 에 userImgUrl / styleImgUrl를 image_url로 전달
-//    (모델이 이미지→이미지 변환을 지원한다고 가정한 요청 포맷)
-// 5) 반환된 base64 PNG를 Buffer로 변환
+// 변경된 핵심:
+// - 더 이상 Dropbox 공개 URL 필요 없음
+// - 방문자 이미지(512x512 PNG) => base64 인코딩해서 그대로 전송
+// - 스타일 참조 이미지(style_ref_all.png)도 로컬에서 읽어서 base64로 전송
+// - OpenAI 응답에서 base64 PNG를 다시 Buffer로 복원
 //
-async function stylizeWithGPT(resizedBuffer, baseName) {
-  //
-  // 1. 방문자 리사이즈 이미지 Dropbox 업로드
-  //
-  const tempResizedDesiredPath = `/booth_temp/${baseName}_512.png`;
-  const uploadedUser = await uploadToDropbox(
-    tempResizedDesiredPath,
-    resizedBuffer
-  );
-  const userCanonicalPath = uploadedUser.path_lower; // canonical
 
-  //
-  // 2. Dropbox에서 해당 업로드 파일의 접근 URL 확보
-  //
-  const userImgUrl = await getDropboxPublicUrl(userCanonicalPath);
+/**
+ * @param {Buffer} resizedBuffer 512x512 PNG buffer (사용자 실물 사진 정규화본)
+ * @param {string} styleRefPath  로컬 스타일 참조 PNG 파일 경로
+ * @returns {Promise<Buffer>}    결과물 PNG 바이너리 Buffer
+ */
+async function stylizeWithGPT(resizedBuffer, styleRefPath) {
+  // 방문자 이미지 base64
+  const userB64 = resizedBuffer.toString("base64");
 
-  //
-  // 3. 스타일 참조 이미지 URL 확보
-  //    스타일 참조 이미지는 이미 Dropbox에 있다고 가정하므로
-  //    getDropboxPublicUrl(STYLE_DBX_PATH)를 직접 호출 → canonicalPath로 가정
-  //
-  const styleImgUrl = await getDropboxPublicUrl(STYLE_DBX_PATH);
+  // 스타일 참조 이미지를 로컬에서 읽어서 base64
+  let styleBuf;
+  try {
+    styleBuf = fs.readFileSync(styleRefPath);
+  } catch (e) {
+    console.error("❌ style reference load failed:", e);
+    throw new Error("style reference image not found");
+  }
+  const styleB64 = styleBuf.toString("base64");
 
   console.log("DEBUG calling OpenAI with:");
   console.log("DEBUG OPENAI KEY preview:", (OPENAI_KEY || "").slice(0, 12));
-  console.log("DEBUG userImgUrl:", userImgUrl);
-  console.log("DEBUG styleImgUrl:", styleImgUrl);
 
+  // OpenAI 요청 바디
+  // 이미지 2장을 함께 주고
+  // 첫 번째 인물 사진을 두 번째 스타일로 다시 그리라고 지시
   //
-  // 4. OpenAI 요청 본문
-  // model: gpt-4o-mini-2024-07-18 (멀티모달 응답형식 가정)
-  // image_url을 참조 이미지로 넘기고,
-  // "이 사람을 이 스타일로 리드로잉해서 PNG로 줘"라고 지시
+  // 주의: 이 요청 포맷은 /v1/responses의 멀티모달 input 형식을 가정한다.
+  // 모델이 이미지 변환을 지원한다는 전제 하에, image_data로 base64 URI를 전달한다.
   //
   const gptRequestBody = {
     model: "gpt-4o-mini-2024-07-18",
@@ -328,11 +202,12 @@ async function stylizeWithGPT(resizedBuffer, baseName) {
           },
           {
             type: "input_image",
-            image_url: userImgUrl
+            // base64 Data URI로 전달
+            image_data: `data:image/png;base64,${userB64}`
           },
           {
             type: "input_image",
-            image_url: styleImgUrl
+            image_data: `data:image/png;base64,${styleB64}`
           }
         ]
       }
@@ -355,11 +230,21 @@ async function stylizeWithGPT(resizedBuffer, baseName) {
     throw new Error("gpt style remix failed");
   }
 
+  // OpenAI 응답에서 base64 PNG 추출
+  // 기대 형태:
+  // result.output[0].content[*] 중
+  //   {
+  //     type: "output_image",
+  //     image: { b64_json: "..." }
+  //   }
+  // 또는
+  //   {
+  //     type: "output_image",
+  //     image: "iVBOR...." (PNG base64)
+  //   }
   //
-  // 5. OpenAI 응답에서 base64 PNG 추출
-  //    예상 포맷:
-  //    result.output[0].content[*] 중
-  //    { type:"output_image", image:{ b64_json:"..." } }
+  // fallback:
+  //   result.data[0].b64_json
   //
   let base64Image = null;
 
@@ -379,7 +264,6 @@ async function stylizeWithGPT(resizedBuffer, baseName) {
         break;
       }
 
-      // fallback: chunk.image 가 바로 base64일 수도 있음
       if (
         chunk.type === "output_image" &&
         typeof chunk.image === "string"
@@ -390,7 +274,6 @@ async function stylizeWithGPT(resizedBuffer, baseName) {
     }
   }
 
-  // 구형-style fallback (호환성)
   if (
     !base64Image &&
     result.data &&
@@ -408,6 +291,7 @@ async function stylizeWithGPT(resizedBuffer, baseName) {
     throw new Error("no_image_in_gpt_response");
   }
 
+  // base64 → Buffer
   const outBytes = Buffer.from(base64Image, "base64");
   return outBytes;
 }
@@ -415,30 +299,25 @@ async function stylizeWithGPT(resizedBuffer, baseName) {
 //
 // ─────────────────────────────
 // /upload 라우트
-// 프론트(FormData)에서 nickname, photo(File) 전송한다고 가정
+// 프론트(FormData)에서
+//   nickname: "사용자입력닉네임"
+//   photo: (File)
+// 전송한다고 가정
 // ─────────────────────────────
 //
 app.post("/upload", upload.single("photo"), async (req, res) => {
   try {
-    //
     // 1. 닉네임 처리
-    //
     const rawNickname = req.body.nickname || "";
-    const cleanName = sanitizeName(rawNickname); // 한글 등은 제거되어 guest로 갈 수도 있음
+    const cleanName = sanitizeName(rawNickname); // 한글 등은 제거되어 "guest"가 될 수도 있음
 
-    //
     // 2. 타임스탬프
-    //
     const stamp = makeKRTimestamp();
 
-    //
-    // 3. 파일명(기본)
-    //
+    // 3. baseName
     const baseName = `${cleanName}_${stamp}`;
 
-    //
-    // 4. 업로드된 파일 여부
-    //
+    // 4. 업로드된 파일 여부 점검
     if (!req.file || !req.file.buffer) {
       return res.status(400).json({
         ok: false,
@@ -448,9 +327,7 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
 
     const originalBuffer = req.file.buffer;
 
-    //
     // 5. 원본을 PNG로 정규화 → Dropbox /booth_uploads 에 저장
-    //
     const normalizedPngBuffer = await toPng(originalBuffer);
     const originalDesiredPath = `/booth_uploads/${baseName}.png`;
     const uploadedOriginal = await uploadToDropbox(
@@ -459,17 +336,13 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
     );
     const originalCanonicalPath = uploadedOriginal.path_lower;
 
-    //
     // 6. 512x512 PNG 버전 생성
-    //
     const resizedBuffer = await toPng512(originalBuffer);
 
-    //
-    // 7. GPT 스타일 변환
-    //
+    // 7. GPT 스타일 변환 (Dropbox 공유링크 없이 base64 직통)
     let stylizedBuffer;
     try {
-      stylizedBuffer = await stylizeWithGPT(resizedBuffer, baseName);
+      stylizedBuffer = await stylizeWithGPT(resizedBuffer, STYLE_REF_LOCAL);
     } catch (err) {
       console.error("❌ stylizeWithGPT failed:", err);
       return res.status(500).json({
@@ -480,9 +353,7 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
       });
     }
 
-    //
     // 8. 변환된 이미지를 Dropbox /booth_outputs 에 저장
-    //
     const stylizedDesiredPath = `/booth_outputs/${baseName}_stylized.png`;
     const uploadedStylized = await uploadToDropbox(
       stylizedDesiredPath,
@@ -490,9 +361,7 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
     );
     const stylizedCanonicalPath = uploadedStylized.path_lower;
 
-    //
     // 9. 성공 응답
-    //
     return res.json({
       ok: true,
       message: "upload + stylize complete",
