@@ -92,7 +92,7 @@ async function toPng512(buffer) {
 //
 // ─────────────────────────────
 // Dropbox 업로드 전용 함수
-//  (공유 링크는 이제 만들지 않는다)
+// (공유 링크는 만들지 않는다. 아카이브만 한다.)
 // ─────────────────────────────
 //
 
@@ -136,7 +136,6 @@ async function uploadToDropbox(desiredPath, fileBytes) {
     throw new Error("dropbox upload failed");
   }
 
-  // Dropbox가 실제 인식하는 경로(canonical)
   console.log("✅ Dropbox upload success:", data.path_lower);
   return data;
 }
@@ -146,23 +145,23 @@ async function uploadToDropbox(desiredPath, fileBytes) {
 // OpenAI 호출 (이미지 스타일 변환)
 // ─────────────────────────────
 //
-// 변경된 핵심:
-// - 더 이상 Dropbox 공개 URL 필요 없음
-// - 방문자 이미지(512x512 PNG) => base64 인코딩해서 그대로 전송
-// - 스타일 참조 이미지(style_ref_all.png)도 로컬에서 읽어서 base64로 전송
-// - OpenAI 응답에서 base64 PNG를 다시 Buffer로 복원
+// 변경 핵심:
+// 1. Dropbox URL 안 쓴다.
+// 2. base64 → data URL 로 변환 후 image_url로 넘긴다.
+// 3. 응답에서 output_image를 꺼내서 PNG Buffer로 돌려준다.
 //
 
 /**
- * @param {Buffer} resizedBuffer 512x512 PNG buffer (사용자 실물 사진 정규화본)
+ * @param {Buffer} resizedBuffer 512x512 PNG buffer (사용자 입력 이미지)
  * @param {string} styleRefPath  로컬 스타일 참조 PNG 파일 경로
  * @returns {Promise<Buffer>}    결과물 PNG 바이너리 Buffer
  */
 async function stylizeWithGPT(resizedBuffer, styleRefPath) {
   // 방문자 이미지 base64
   const userB64 = resizedBuffer.toString("base64");
+  const userDataUrl = `data:image/png;base64,${userB64}`;
 
-  // 스타일 참조 이미지를 로컬에서 읽어서 base64
+  // 스타일 참조 이미지 base64
   let styleBuf;
   try {
     styleBuf = fs.readFileSync(styleRefPath);
@@ -171,17 +170,14 @@ async function stylizeWithGPT(resizedBuffer, styleRefPath) {
     throw new Error("style reference image not found");
   }
   const styleB64 = styleBuf.toString("base64");
+  const styleDataUrl = `data:image/png;base64,${styleB64}`;
 
   console.log("DEBUG calling OpenAI with:");
   console.log("DEBUG OPENAI KEY preview:", (OPENAI_KEY || "").slice(0, 12));
 
   // OpenAI 요청 바디
-  // 이미지 2장을 함께 주고
-  // 첫 번째 인물 사진을 두 번째 스타일로 다시 그리라고 지시
-  //
-  // 주의: 이 요청 포맷은 /v1/responses의 멀티모달 input 형식을 가정한다.
-  // 모델이 이미지 변환을 지원한다는 전제 하에, image_data로 base64 URI를 전달한다.
-  //
+  // image_url 필드에 data URL을 직접 넣는다.
+  // (image_data 대신 image_url)
   const gptRequestBody = {
     model: "gpt-4o-mini-2024-07-18",
     input: [
@@ -202,12 +198,11 @@ async function stylizeWithGPT(resizedBuffer, styleRefPath) {
           },
           {
             type: "input_image",
-            // base64 Data URI로 전달
-            image_data: `data:image/png;base64,${userB64}`
+            image_url: userDataUrl
           },
           {
             type: "input_image",
-            image_data: `data:image/png;base64,${styleB64}`
+            image_url: styleDataUrl
           }
         ]
       }
@@ -231,21 +226,6 @@ async function stylizeWithGPT(resizedBuffer, styleRefPath) {
   }
 
   // OpenAI 응답에서 base64 PNG 추출
-  // 기대 형태:
-  // result.output[0].content[*] 중
-  //   {
-  //     type: "output_image",
-  //     image: { b64_json: "..." }
-  //   }
-  // 또는
-  //   {
-  //     type: "output_image",
-  //     image: "iVBOR...." (PNG base64)
-  //   }
-  //
-  // fallback:
-  //   result.data[0].b64_json
-  //
   let base64Image = null;
 
   if (
@@ -255,6 +235,7 @@ async function stylizeWithGPT(resizedBuffer, styleRefPath) {
     Array.isArray(result.output[0].content)
   ) {
     for (const chunk of result.output[0].content) {
+      // 예상 1: { type:"output_image", image:{ b64_json:"..." } }
       if (
         chunk.type === "output_image" &&
         chunk.image &&
@@ -263,7 +244,7 @@ async function stylizeWithGPT(resizedBuffer, styleRefPath) {
         base64Image = chunk.image.b64_json;
         break;
       }
-
+      // 예상 2: { type:"output_image", image:"iVBOR..." }
       if (
         chunk.type === "output_image" &&
         typeof chunk.image === "string"
@@ -274,6 +255,7 @@ async function stylizeWithGPT(resizedBuffer, styleRefPath) {
     }
   }
 
+  // fallback (일부 구형 응답 스타일)
   if (
     !base64Image &&
     result.data &&
@@ -299,17 +281,16 @@ async function stylizeWithGPT(resizedBuffer, styleRefPath) {
 //
 // ─────────────────────────────
 // /upload 라우트
-// 프론트(FormData)에서
-//   nickname: "사용자입력닉네임"
+// 프론트(FormData):
+//   nickname: "사용자닉네임"
 //   photo: (File)
-// 전송한다고 가정
 // ─────────────────────────────
 //
 app.post("/upload", upload.single("photo"), async (req, res) => {
   try {
     // 1. 닉네임 처리
     const rawNickname = req.body.nickname || "";
-    const cleanName = sanitizeName(rawNickname); // 한글 등은 제거되어 "guest"가 될 수도 있음
+    const cleanName = sanitizeName(rawNickname);
 
     // 2. 타임스탬프
     const stamp = makeKRTimestamp();
@@ -317,7 +298,7 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
     // 3. baseName
     const baseName = `${cleanName}_${stamp}`;
 
-    // 4. 업로드된 파일 여부 점검
+    // 4. 업로드된 파일 여부 확인
     if (!req.file || !req.file.buffer) {
       return res.status(400).json({
         ok: false,
@@ -339,7 +320,7 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
     // 6. 512x512 PNG 버전 생성
     const resizedBuffer = await toPng512(originalBuffer);
 
-    // 7. GPT 스타일 변환 (Dropbox 공유링크 없이 base64 직통)
+    // 7. GPT 스타일 변환 (이제 Dropbox 공유링크 없음, 바로 base64로)
     let stylizedBuffer;
     try {
       stylizedBuffer = await stylizeWithGPT(resizedBuffer, STYLE_REF_LOCAL);
@@ -353,7 +334,7 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
       });
     }
 
-    // 8. 변환된 이미지를 Dropbox /booth_outputs 에 저장
+    // 8. 변환된 이미지를 Dropbox /booth_outputs 에 저장 (아카이브)
     const stylizedDesiredPath = `/booth_outputs/${baseName}_stylized.png`;
     const uploadedStylized = await uploadToDropbox(
       stylizedDesiredPath,
